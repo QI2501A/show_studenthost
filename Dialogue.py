@@ -41,8 +41,10 @@ from __future__ import annotations
 import argparse
 import http.server
 import json
+import mimetypes
 import os
 import platform
+import queue
 import re
 import shutil
 import socketserver
@@ -181,7 +183,7 @@ def load_show_host_config() -> dict:
     hub_dashboard/config.yaml, which app.py owns)."""
     defaults = {
         "venue_lat": 1.3840, "venue_lon": 103.7470, "venue_tz": "Asia/Singapore",
-        "rise_video": None, "rogue_video": None,
+        "rise_video": None, "rogue_video": None, "rogue_music": None,
     }
     config_path = ROOT / "config.yaml"
     try:
@@ -198,6 +200,17 @@ def resolve_video_path(cli_value: str | None, cfg: dict, config_key: str, defaul
     raw = cli_value or cfg.get(config_key)
     if not raw:
         return default_path
+    p = Path(raw)
+    return p if p.is_absolute() else (ROOT / p)
+
+
+def resolve_optional_path(cfg: dict, config_key: str) -> "Path | None":
+    """Like resolve_video_path, but for a config key with no built-in
+    default file (e.g. rogue_music) — None if unset, rather than falling
+    back to some fixed path."""
+    raw = cfg.get(config_key)
+    if not raw:
+        return None
     p = Path(raw)
     return p if p.is_absolute() else (ROOT / p)
 
@@ -233,6 +246,26 @@ def speech_segments(text: str) -> list[str]:
         return []
     segments = [strip_for_speech(p) for p in re.split(r"\n\s*\n", text)]
     return [s for s in segments if s]
+
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def sentence_lines(text: str) -> list[str]:
+    """Splits a chatbot line into one entry per SENTENCE, for the chatbot
+    screen's display only — independent of speech_segments' paragraph-level
+    grouping, which is about where TTS pauses, not where the screen breaks a
+    line. Every sentence (e.g. "Current conditions: drizzle, 31°C.") gets
+    its own visual line on the chatbot screen, per request."""
+    if not text:
+        return []
+    lines: list[str] = []
+    for para in re.split(r"\n\s*\n", text):
+        cleaned = strip_for_speech(para)
+        if not cleaned:
+            continue
+        lines.extend(s for s in (p.strip() for p in _SENTENCE_SPLIT_RE.split(cleaned)) if s)
+    return lines
 
 
 # "live" is a heteronym: TTS engines default to the adjective (rhymes with
@@ -305,6 +338,118 @@ def run_with_timeout(fn, timeout: float):
     if "error" in result:
         raise result["error"]
     return True, result.get("value")
+
+
+# --------------------------------------------------------------------------- manual override (no Ctrl+C needed)
+#
+# Ctrl+C alone turned out not to be a reliable manual override on the actual
+# show laptop: a Windows console's QuickEdit Mode can grab Ctrl+C for its own
+# copy/paste the moment anyone has clicked to select text, AND — the bigger
+# issue — the terminal usually doesn't have keyboard focus at all for most of
+# the show, since the full-screen kiosk browser (the chatbot screen) sits in
+# front of it. So listening for the student's cue polls for TWO independent
+# override sources instead of trusting a signal to arrive: a keypress at
+# this terminal (works if it happens to have focus) and a press on the
+# chatbot screen itself (see ChatbotScreen.override_requested — reachable
+# because that's what's actually in front of the operator).
+
+def _terminal_key_ready() -> bool:
+    """Non-blocking: True if a key is waiting to be read at this terminal."""
+    if sys.platform == "win32":
+        try:
+            import msvcrt
+
+            return msvcrt.kbhit()
+        except Exception:
+            return False
+    try:
+        import select
+
+        ready, _, _ = select.select([sys.stdin], [], [], 0)
+        return bool(ready)
+    except Exception:
+        return False
+
+
+def _consume_terminal_key() -> None:
+    if sys.platform == "win32":
+        try:
+            import msvcrt
+
+            while msvcrt.kbhit():
+                msvcrt.getch()
+        except Exception:
+            pass
+        return
+    try:
+        sys.stdin.read(1)
+    except Exception:
+        pass
+
+
+class _TerminalRawMode:
+    """POSIX only (no-op on Windows, where msvcrt.kbhit() needs no mode
+    change): puts stdin into cbreak mode for the life of a `with` block so a
+    single keypress is visible immediately, without waiting for Enter — and
+    restores normal cooked/echo mode on exit, since other parts of the show
+    still use plain input() and need it back."""
+
+    def __enter__(self):
+        self._saved = None
+        if sys.platform != "win32":
+            try:
+                import termios
+                import tty
+
+                if sys.stdin.isatty():
+                    self._fd = sys.stdin.fileno()
+                    self._saved = termios.tcgetattr(self._fd)
+                    tty.setcbreak(self._fd)
+            except Exception:
+                self._saved = None
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        if self._saved is not None:
+            try:
+                import termios
+
+                termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved)
+            except Exception:
+                pass
+
+
+def listen_with_manual_override(fn, timeout: float, screen: "ChatbotScreen | None"):
+    """Like run_with_timeout, but polls every ~150ms for either override
+    source described above, in addition to fn() finishing on its own.
+    Returns ("done", value), ("override", None), or ("timeout", None). A
+    thread still running when this gives up is simply abandoned (daemon
+    thread) — same contract as run_with_timeout."""
+    result: dict = {}
+
+    def worker():
+        try:
+            result["value"] = fn()
+        except Exception as exc:
+            result["error"] = exc
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    deadline = time.monotonic() + timeout
+    with _TerminalRawMode():
+        while True:
+            if screen is not None and screen.override_requested():
+                return "override", None
+            if _terminal_key_ready():
+                _consume_terminal_key()
+                return "override", None
+            if not t.is_alive():
+                if "error" in result:
+                    raise result["error"]
+                return "done", result.get("value")
+            if time.monotonic() >= deadline:
+                return "timeout", None
+            t.join(0.15)
 
 
 # --------------------------------------------------------------------------- chatbot screen (visual output)
@@ -428,13 +573,64 @@ class _ScreenHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif self.path.startswith("/video"):
             self._serve_video()
+        elif self.path.startswith("/music"):
+            self._serve_music()
+        elif self.path.startswith("/js/") or self.path.startswith("/vendor/"):
+            self._serve_static()
         else:
             self.send_response(404)
             self.end_headers()
 
+    def _serve_static(self) -> None:
+        """Serves the humanoid-head assets (js/skull/*, vendor/three/*) that
+        screen.html loads as ES modules — a separate build, dropped into
+        this repo under show_host/js and show_host/vendor, so this just
+        needs a plain static file server for those two prefixes rather than
+        anything specific to the head itself."""
+        rel = urllib.parse.unquote(self.path.split("?", 1)[0]).lstrip("/")
+        try:
+            file_path = (ROOT / rel).resolve()
+            file_path.relative_to(ROOT.resolve())
+        except (ValueError, OSError):
+            self.send_response(403)
+            self.end_headers()
+            return
+        if not file_path.is_file():
+            self.send_response(404)
+            self.end_headers()
+            return
+        if file_path.suffix.lower() in (".js", ".mjs"):
+            content_type = "text/javascript"
+        else:
+            content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        body = file_path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def do_POST(self) -> None:
         if self.path == "/video-ended":
             self.server.screen_ref._video_ended.set()
+            self.send_response(204)
+            self.end_headers()
+        elif self.path == "/override":
+            self.server.screen_ref._manual_override.set()
+            self.send_response(204)
+            self.end_headers()
+        elif self.path == "/confirm-override-command":
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b""
+            try:
+                text = json.loads(raw).get("text", "") if raw else ""
+            except Exception:
+                text = ""
+            self.server.screen_ref.override_command_texts.put(text)
             self.send_response(204)
             self.end_headers()
         else:
@@ -476,6 +672,23 @@ class _ScreenHandler(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass  # browser navigated away / seeked — not an error
 
+    def _serve_music(self) -> None:
+        path = self.server.screen_ref._music_path
+        if not path or not path.exists():
+            self.send_response(404)
+            self.end_headers()
+            return
+        content_type = mimetypes.guess_type(str(path))[0] or "audio/mpeg"
+        body = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
 
 class ChatbotScreen:
     """A dedicated black-background, green-monospace browser page that types
@@ -494,16 +707,22 @@ class ChatbotScreen:
 
     PORT = 8765
 
-    def __init__(self, enabled: bool = True) -> None:
+    def __init__(self, enabled: bool = True, music_path: "Path | None" = None) -> None:
         self.available = False
         self.url = None
         self.httpd = None
         self._video_path: Path | None = None
         self._video_ended = threading.Event()
+        self._manual_override = threading.Event()
+        self.override_command_texts: "queue.Queue[str]" = queue.Queue()
+        self._music_path = music_path if (music_path and music_path.exists()) else None
         self._state_lock = threading.Lock()
         self._state = {
             "seq": 0, "mode": "chat", "segments": [], "rate_wpm": SPEECH_RATE_WPM,
-            "theme": "green", "clear_seq": 0,
+            "theme": "green", "clear_seq": 0, "speaking": False,
+            "has_music_file": self._music_path is not None,
+            "heard_seq": 0, "heard_segments": [],
+            "override_feedback_seq": 0, "override_feedback_ok": True,
         }
         if not enabled:
             return
@@ -542,6 +761,16 @@ class ChatbotScreen:
                 self._state["seq"] += 1
                 self._state["mode"] = "chat"
                 self._state["segments"] = list(segments)
+
+    def show_heard(self, text: str) -> None:
+        """Feeds the mic's live speech-to-text transcript to the screen's
+        left panel — separate from show()'s chat panel (the chatbot's own
+        answers, centre), so what the system heard the student say and what
+        it says back never mix into the same log."""
+        if self.available and text:
+            with self._state_lock:
+                self._state["heard_seq"] += 1
+                self._state["heard_segments"] = [text]
 
     def play_video(self, path: Path, speed: float = 1.0, timeout_s: float = 900) -> bool:
         """Switches the screen to full-screen video playback and blocks until
@@ -584,6 +813,54 @@ class ChatbotScreen:
                 self._state["clear_seq"] += 1
                 self._state["segments"] = []
 
+    def override_requested(self) -> bool:
+        """True (once) if the operator has pressed SPACE/ENTER or tapped the
+        corner hint on the chatbot screen itself since the last check — see
+        screen.html's sendOverride(). Consumes the flag so it only fires
+        once per press. This is the primary manual-override path: the kiosk
+        browser window is what actually has keyboard focus for nearly the
+        whole show, not the terminal behind it, so the override has to be
+        reachable from here."""
+        if self._manual_override.is_set():
+            self._manual_override.clear()
+            return True
+        return False
+
+    def set_override_feedback(self, ok: bool) -> None:
+        """Tells the chatbot screen's code-entry field whether the text it
+        just submitted matched the OVERRIDE keyword — 'ACCESS DENIED' for a
+        wrong code, nothing needed for a right one (the screen is about to
+        clear and turn green anyway)."""
+        if self.available:
+            with self._state_lock:
+                self._state["override_feedback_seq"] += 1
+                self._state["override_feedback_ok"] = ok
+
+    def set_speaking(self, speaking: bool) -> None:
+        """Flags whether the chatbot is mid-utterance right now — exposed on
+        /state for whatever renders the humanoid head (a Three.js animation
+        built separately) to sync mouth movement to. The real TTS audio
+        never reaches the browser, so start/stop is the finest-grained sync
+        available."""
+        if self.available:
+            with self._state_lock:
+                self._state["speaking"] = speaking
+
+    def show_terminal(self, lines: list[dict]) -> None:
+        """Mirrors the operator console's simulated command lines (see
+        print_terminal) onto the chatbot screen itself, so the audience sees
+        the same "something is happening" commands after OVERRIDE is
+        confirmed, not just the operator at their console."""
+        rendered = []
+        for entry in lines:
+            if "comment" in entry:
+                rendered.append(f"# {entry['comment']}")
+            elif "cmd" in entry:
+                rendered.append(f">>> {entry['cmd']}")
+            elif "out" in entry:
+                rendered.append(str(entry["out"]))
+        self.show(rendered)
+
     def close(self) -> None:
         if self.httpd:
             try:
@@ -611,8 +888,8 @@ class Voice:
     def __init__(self, screen: "ChatbotScreen | None" = None) -> None:
         self.screen = screen
         self.mode: str | None = None  # "say" (macOS) or "pyttsx3" (Windows/Linux) or None (text-only)
-        self.engine = None            # persistent pyttsx3 engine, only when mode == "pyttsx3"
         self.say_voice: str | None = None
+        self._tts_queue: "queue.Queue | None" = None  # pyttsx3 mode only — see _tts_worker
 
         if sys.platform == "darwin" and shutil.which("say"):
             # macOS's own `say` command gives the same system voices pyttsx3
@@ -628,20 +905,99 @@ class Voice:
             return
 
         try:
-            ok, built = run_with_timeout(self._build_pyttsx3, self.INIT_TIMEOUT_S)
-            if ok:
-                self.engine, voice_id = built
-                self.mode = "pyttsx3"
-                if voice_id:
-                    self.engine.setProperty("voice", voice_id)
-            else:
-                print(f"[voice] TTS init did not respond within {self.INIT_TIMEOUT_S}s "
-                      "(no speaker / permission not granted yet?); chatbot lines will be shown as text only.")
+            import pyttsx3  # noqa: F401 — import check only; actually used inside _tts_worker
         except ImportError:
             print("[voice] pyttsx3 not installed; chatbot lines will be shown as text only. "
                   "Run: pip install pyttsx3")
+            return
+
+        # pyttsx3's engine (SAPI5 on Windows, a COM object under the hood) has
+        # to be created AND driven from one single, consistent thread for its
+        # entire life. Calling engine.say()/runAndWait() from a different
+        # thread each time — which is exactly what wrapping each call in
+        # run_with_timeout used to do, spinning up a fresh daemon thread per
+        # line — hangs runAndWait() forever on the first such call and then
+        # raises "run loop already started" on every call after that.
+        # Reproduced directly on the show laptop's own environment: the first
+        # chatbot line hung for the full SAY_TIMEOUT_S before giving up, and
+        # every line after that failed silently — exactly the "freezes after
+        # the chatbot's first response, then never speaks again" symptom.
+        # Fix: the engine is built inside its own dedicated worker thread
+        # below, and every later say() hands its text to that SAME thread
+        # over a queue instead of ever touching the engine from elsewhere.
+        ready = threading.Event()
+        init_result: dict = {}
+        self._tts_queue = queue.Queue()
+        threading.Thread(target=self._tts_worker, args=(ready, init_result), daemon=True).start()
+        if not ready.wait(self.INIT_TIMEOUT_S):
+            print(f"[voice] TTS init did not respond within {self.INIT_TIMEOUT_S}s "
+                  "(no speaker / permission not granted yet?); chatbot lines will be shown as text only.")
+            self._tts_queue = None
+            return
+        if "error" in init_result:
+            print(f"[voice] TTS engine unavailable ({init_result['error']}); "
+                  "chatbot lines will be shown as text only.")
+            self._tts_queue = None
+            return
+        self.mode = "pyttsx3"
+
+    def _tts_worker(self, ready: threading.Event, init_result: dict) -> None:
+        """Drives TTS for the rest of the show, always from this one thread
+        (see the thread-affinity comment in __init__) — but builds a FRESH
+        pyttsx3 Engine for every single line rather than reusing one engine
+        for the whole show.
+
+        pyttsx3.init() caches and hands back the SAME Engine instance for a
+        given driver name for as long as anything still holds a reference to
+        it (see its module-level _activeEngines cache) — and this project's
+        own README already documented that reusing one engine for a whole
+        show "is known to silently stop producing audio after a number of
+        calls" (exactly why macOS uses `say` as a fresh subprocess per line
+        instead of pyttsx3 at all). Confirmed live on the show laptop: the
+        chatbot's voice worked once, then went completely silent from the
+        next line on. Engine(...) is constructed directly here rather than
+        via pyttsx3.init(), which bypasses that cache — each line gets a
+        genuinely new engine/COM voice object, while still never leaving
+        this one thread avoids the earlier cross-thread hang."""
+        from pyttsx3.engine import Engine
+
+        voice_id = None
+        try:
+            probe = Engine(None, False)
+            try:
+                voices = probe.getProperty("voices") or []
+                by_name = {(getattr(v, "name", "") or "").lower(): v.id for v in voices}
+                voice_id = next((by_name[w.lower()] for w in PREFERRED_VOICES if w.lower() in by_name), None)
+            except Exception:
+                pass  # voice selection is a nicety, not worth failing init over
+            finally:
+                try:
+                    probe.stop()
+                except Exception:
+                    pass
         except Exception as exc:
-            print(f"[voice] TTS engine unavailable ({exc}); chatbot lines will be shown as text only.")
+            init_result["error"] = exc
+            ready.set()
+            return
+        ready.set()
+        while True:
+            text, done, result = self._tts_queue.get()
+            try:
+                engine = Engine(None, False)
+                try:
+                    engine.setProperty("rate", self.RATE_WPM)
+                    if voice_id:
+                        engine.setProperty("voice", voice_id)
+                    engine.say(text)
+                    engine.runAndWait()
+                finally:
+                    try:
+                        engine.stop()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                result["error"] = exc
+            done.set()
 
     @property
     def available(self) -> bool:
@@ -656,20 +1012,6 @@ class Voice:
         names = {line.split()[0] for line in out.splitlines() if line.strip()}
         return next((v for v in PREFERRED_VOICES if v in names), None)
 
-    @staticmethod
-    def _build_pyttsx3():
-        import pyttsx3
-
-        engine = pyttsx3.init()
-        engine.setProperty("rate", Voice.RATE_WPM)
-        try:
-            voices = engine.getProperty("voices") or []
-            by_name = {(getattr(v, "name", "") or "").lower(): v.id for v in voices}
-            voice_id = next((by_name[w.lower()] for w in PREFERRED_VOICES if w.lower() in by_name), None)
-        except Exception:
-            voice_id = None
-        return engine, voice_id
-
     def _speak_say_cmd(self, text: str) -> None:
         cmd = ["say", "-r", str(self.RATE_WPM)]
         if self.say_voice:
@@ -678,44 +1020,83 @@ class Voice:
         subprocess.run(cmd, timeout=self.SAY_TIMEOUT_S, check=False)
 
     def _speak_pyttsx3(self, text: str) -> None:
-        self.engine.say(text)
-        self.engine.runAndWait()
+        """Hands text to the dedicated TTS worker thread and blocks (with the
+        usual safety-net timeout) until it's spoken — never touches the
+        engine directly from this (caller's) thread."""
+        done = threading.Event()
+        result: dict = {}
+        self._tts_queue.put((text, done, result))
+        if not done.wait(self.SAY_TIMEOUT_S):
+            print(f"[voice] TTS playback did not finish within {self.SAY_TIMEOUT_S}s; "
+                  "skipping audio for this line.")
+        elif "error" in result:
+            raise result["error"]
 
     def say(self, text: str) -> None:
         segments = speech_segments(text)
         if not segments:
             return
         if self.screen:
-            self.screen.show(segments)
+            # sentence_lines(), not segments -- the screen breaks each
+            # SENTENCE onto its own visual line, independent of segments'
+            # paragraph-level grouping (which is only about where TTS
+            # pauses), per request.
+            self.screen.show(sentence_lines(text))
 
         if not self.available:
             # No audio — still pace the narration roughly like real speech,
-            # including the scripted pause, so timing feels natural either way.
+            # including the scripted pause, so timing feels natural either way,
+            # and still flag "speaking" so the head on-screen animates.
             word_count = sum(len(s.split()) for s in segments)
-            time.sleep(min(8.0, max(0.6, word_count / 2.5)) + self.PARAGRAPH_PAUSE_S * (len(segments) - 1))
+            duration = min(8.0, max(0.6, word_count / 2.5)) + self.PARAGRAPH_PAUSE_S * (len(segments) - 1)
+            if self.screen:
+                self.screen.set_speaking(True)
+            time.sleep(duration)
+            if self.screen:
+                self.screen.set_speaking(False)
             return
 
-        speak_fn = self._speak_say_cmd if self.mode == "say" else self._speak_pyttsx3
         for i, segment in enumerate(segments):
             spoken = apply_pronunciation_fixups(segment)
+            if self.screen:
+                self.screen.set_speaking(True)
             try:
-                ok, _ = run_with_timeout(lambda spoken=spoken: speak_fn(spoken), self.SAY_TIMEOUT_S)
-                if not ok:
-                    print(f"[voice] TTS playback did not finish within {self.SAY_TIMEOUT_S}s; "
-                          "skipping audio for this line.")
+                if self.mode == "pyttsx3":
+                    self._speak_pyttsx3(spoken)
+                else:
+                    ok, _ = run_with_timeout(lambda spoken=spoken: self._speak_say_cmd(spoken), self.SAY_TIMEOUT_S)
+                    if not ok:
+                        print(f"[voice] TTS playback did not finish within {self.SAY_TIMEOUT_S}s; "
+                              "skipping audio for this line.")
             except Exception as exc:
                 print(f"[voice] TTS playback failed ({exc}).")
+            finally:
+                if self.screen:
+                    self.screen.set_speaking(False)
             if i < len(segments) - 1:
                 time.sleep(self.PARAGRAPH_PAUSE_S)
 
 
 # --------------------------------------------------------------------------- voice in (listens for the student's cues)
 
+def _prompt_enter(prompt: str) -> None:
+    """input() used purely as a manual confirmation gate (never for its typed
+    content) — a closed/absent stdin (EOFError, e.g. launched with no console
+    attached) must never crash the show here; treat it exactly like the
+    operator confirming immediately, matching run_override's own EOF-tolerant
+    behaviour."""
+    try:
+        input(f"{ANSI['gray']}{prompt}{ANSI['reset']} ")
+    except EOFError:
+        pass
+
+
 class VoiceListener:
     INIT_TIMEOUT_S = 8
     LISTEN_MARGIN_S = 15  # safety margin added on top of each listen()'s own timeout/phrase_time_limit
 
-    def __init__(self) -> None:
+    def __init__(self, screen: "ChatbotScreen | None" = None) -> None:
+        self.screen = screen
         self.sr = None
         self.recognizer = None
         self.mic = None
@@ -763,32 +1144,38 @@ class VoiceListener:
         match on a whole sentence."""
         keyword_norm = keyword.strip().upper()
         if not self.available:
-            input(f"{ANSI['gray']}{prompt}{ANSI['reset']} ")
+            _prompt_enter(prompt)
             return
         print(f"{ANSI['amber']}> LISTENING FOR KEYWORD: {keyword_norm}{ANSI['reset']}  "
-              f"(say it aloud, or Ctrl+C to type it instead)")
+              f"(say it aloud — or if voice isn't detected, press SPACE on the chatbot "
+              f"screen, or any key here, to confirm manually)")
         budget = 4 + self.LISTEN_MARGIN_S
         while True:
             try:
-                ok, heard = run_with_timeout(self._listen_once, budget)
-                if not ok:
-                    print(f"[voice] microphone stopped responding within {budget:.0f}s; "
-                          "falling back to typed keyword.")
-                    input(f"{ANSI['gray']}{prompt}{ANSI['reset']} ")
-                    return
-                if heard is None:
-                    continue  # no speech detected that round — keep listening
-                print(f"  [heard] {heard}")
-                if keyword_norm in heard.strip().upper():
-                    return
+                status, heard = listen_with_manual_override(self._listen_once, budget, self.screen)
             except self.sr.RequestError as exc:
                 print(f"[voice] recognition service error ({exc}); falling back to typed keyword.")
-                input(f"{ANSI['gray']}{prompt}{ANSI['reset']} ")
+                _prompt_enter(prompt)
                 return
             except KeyboardInterrupt:
-                typed = input(f"\n[operator] type to confirm ({keyword_norm}): ")
-                if keyword_norm in typed.strip().upper():
-                    return
+                # Belt-and-braces: Ctrl+C still works when it does reach this
+                # process, and must not escape uncaught either way.
+                return
+            if status == "override":
+                print(f"{ANSI['green']}> manual override — {keyword_norm} confirmed.{ANSI['reset']}")
+                return
+            if status == "timeout":
+                print(f"[voice] microphone stopped responding within {budget:.0f}s; "
+                      "falling back to typed keyword.")
+                _prompt_enter(prompt)
+                return
+            if heard is None:
+                continue  # no speech detected that round — keep listening
+            print(f"  [heard] {heard}")
+            if self.screen:
+                self.screen.show_heard(heard)
+            if keyword_norm in heard.strip().upper():
+                return
 
     def wait_for_line(self, expected_text: str, prompt: str) -> None:
         """Listens until enough of expected_text has been heard (see
@@ -798,33 +1185,43 @@ class VoiceListener:
         listen cycles so a longer line split by a natural pause still
         matches."""
         if not self.available:
-            input(f"{ANSI['gray']}{prompt}{ANSI['reset']} ")
+            _prompt_enter(prompt)
             return
         word_count = len(_significant_words(expected_text)) or 1
         phrase_time_limit = max(6.0, min(30.0, word_count * 0.9))
         budget = phrase_time_limit + self.LISTEN_MARGIN_S
-        print(f"{ANSI['amber']}> listening for the student's line...{ANSI['reset']}")
+        print(f"{ANSI['amber']}> listening for the student's line...{ANSI['reset']}  "
+              f"(if voice isn't detected, press SPACE on the chatbot screen, "
+              f"or any key here, to confirm manually)")
         heard_so_far = ""
         while True:
             try:
-                ok, heard = run_with_timeout(lambda: self._listen_once(phrase_time_limit), budget)
-                if not ok:
-                    print(f"[voice] microphone stopped responding within {budget:.0f}s; "
-                          "falling back to typed cue.")
-                    input(f"{ANSI['gray']}{prompt}{ANSI['reset']} ")
-                    return
-                if heard:
-                    print(f"  [heard] {heard}")
-                    heard_so_far = (heard_so_far + " " + heard).strip()
-                    if phrase_match(expected_text, heard_so_far):
-                        return
+                status, heard = listen_with_manual_override(
+                    lambda: self._listen_once(phrase_time_limit), budget, self.screen
+                )
             except self.sr.RequestError as exc:
                 print(f"[voice] recognition service error ({exc}); falling back to typed cue.")
-                input(f"{ANSI['gray']}{prompt}{ANSI['reset']} ")
+                _prompt_enter(prompt)
                 return
             except KeyboardInterrupt:
-                input(f"\n{ANSI['gray']}[operator] press Enter to confirm the line was said: {ANSI['reset']}")
+                # Belt-and-braces: Ctrl+C still works when it does reach this
+                # process, and must not escape uncaught either way.
                 return
+            if status == "override":
+                print(f"{ANSI['green']}> manual override — line confirmed.{ANSI['reset']}")
+                return
+            if status == "timeout":
+                print(f"[voice] microphone stopped responding within {budget:.0f}s; "
+                      "falling back to typed cue.")
+                _prompt_enter(prompt)
+                return
+            if heard:
+                print(f"  [heard] {heard}")
+                if self.screen:
+                    self.screen.show_heard(heard)
+                heard_so_far = (heard_so_far + " " + heard).strip()
+                if phrase_match(expected_text, heard_so_far):
+                    return
 
 
 # --------------------------------------------------------------------------- hub_dashboard client
@@ -1036,27 +1433,68 @@ def run_rogue_danger(danger: dict, voice: Voice, screen: ChatbotScreen) -> None:
 
 def run_override(override: dict, hub: HubClient, override_keyword: str, screen: ChatbotScreen) -> None:
     """The story has the student physically return to the terminal and type
-    — so unlike every other cue in this file, OVERRIDE is typed here, not
-    spoken. Blocks on real terminal input() until the command is entered."""
+    OVERRIDE — but that's typed input(), which blocks this whole thread, so
+    it can't also poll anything else at the same time. A background thread
+    reads stdin lines into a queue instead, letting the main loop here poll
+    that queue AND the chatbot screen's own code-entry field (screen.html's
+    #overrideInput — a movie-style "key in the secret code" prompt, not a
+    button) together — whichever produces the matching keyword first
+    confirms it. Both sources are validated the same way here, so a wrong
+    code typed on the screen gets the same "unrecognized" treatment as one
+    typed at the terminal, just fed back to the screen instead of printed."""
     print_heading(override["label"], None)
-    print(f"{ANSI['amber']}> AWAITING OVERRIDE COMMAND ON TERMINAL...{ANSI['reset']}")
+    print(f"{ANSI['amber']}> AWAITING OVERRIDE COMMAND...{ANSI['reset']}  "
+          f"(type {override_keyword} here, or key it in on the chatbot screen)")
+
+    # Discard anything queued from before this wait began (e.g. a rehearsal).
+    while not screen.override_command_texts.empty():
+        try:
+            screen.override_command_texts.get_nowait()
+        except queue.Empty:
+            break
+
+    typed_lines: "queue.Queue[str]" = queue.Queue()
+
+    def read_stdin() -> None:
+        while True:
+            try:
+                line = input(f"{ANSI['gray']}${ANSI['reset']} ")
+            except EOFError:
+                typed_lines.put(override_keyword)
+                return
+            typed_lines.put(line)
+
+    threading.Thread(target=read_stdin, daemon=True).start()
+
     while True:
         try:
-            typed = input(f"{ANSI['gray']}${ANSI['reset']} ")
-        except EOFError:
-            typed = override_keyword
-        if override_keyword.upper() in typed.strip().upper():
+            candidate = screen.override_command_texts.get(timeout=0.075)
+            from_screen = True
+        except queue.Empty:
+            try:
+                candidate = typed_lines.get(timeout=0.075)
+                from_screen = False
+            except queue.Empty:
+                continue
+        if override_keyword.upper() in candidate.strip().upper():
             break
-        print(f"  {ANSI['gray']}(unrecognized command — type {override_keyword} to confirm manual override){ANSI['reset']}")
+        if from_screen:
+            screen.set_override_feedback(False)
+        else:
+            print(f"  {ANSI['gray']}(unrecognized command — type {override_keyword}, "
+                  f"or key it in on the chatbot screen){ANSI['reset']}")
+
     print(f"{ANSI['green']}> OVERRIDE CONFIRMED{ANSI['reset']}")
     hub.stop_show()
-    # Manual control restored — the screen goes back to green, fresh.
+    # Manual control restored — the screen goes back to green, fresh (this
+    # also stops the rogue-phase background music — see screen.html).
     screen.clear()
     screen.set_theme("green")
 
     for item in override["items"]:
         if item.get("type") == "terminal":
             print_terminal(item["lines"])
+            screen.show_terminal(item["lines"])  # audience sees the same commands, not just the operator
             continue
         print(f"\n{item.get('icon', '')} {ANSI['bold']}{item['title']}{ANSI['reset']}")
         if item.get("body"):
@@ -1107,9 +1545,53 @@ def run_close(credits: dict | None, close: dict) -> None:
         print(f"  {chip['label']}: {chip['value']}")
 
 
+# --------------------------------------------------------------------------- console hardening
+
+def harden_windows_console() -> None:
+    """Windows only, best-effort. Disables the console's QuickEdit Mode and
+    turns on VT100/ANSI escape processing.
+
+    QuickEdit Mode is on by default in the classic console host and pauses
+    the ENTIRE process — including reading stdin — the instant anyone
+    clicks or drags inside the window to select text; while "selecting",
+    Ctrl+C is grabbed by the console itself (as "copy") instead of reaching
+    Python as an interrupt. That is exactly how OVERRIDE's manual "voice not
+    detected" Ctrl+C escape can silently stop working mid-show — confirmed
+    on the actual show laptop, whose console was also missing VT100
+    processing (hence raw escape codes like `<ESC>[96m` printing literally
+    instead of being read as colour, the same symptom that flagged this).
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        STD_INPUT_HANDLE = -10
+        STD_OUTPUT_HANDLE = -11
+        ENABLE_QUICK_EDIT_MODE = 0x0040
+        ENABLE_EXTENDED_FLAGS = 0x0080
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+
+        kernel32 = ctypes.windll.kernel32
+
+        stdin_handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(stdin_handle, ctypes.byref(mode)):
+            new_mode = (mode.value & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS
+            kernel32.SetConsoleMode(stdin_handle, new_mode)
+
+        stdout_handle = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        out_mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(stdout_handle, ctypes.byref(out_mode)):
+            kernel32.SetConsoleMode(stdout_handle, out_mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+    except Exception:
+        pass  # cosmetic/defensive only — the show must still run if this fails
+
+
 # --------------------------------------------------------------------------- main
 
 def main() -> None:
+    harden_windows_console()
     parser = argparse.ArgumentParser(description="ITE College West Drone & Robot Hub — show host chatbot")
     parser.add_argument("--hub-url", default=os.environ.get("HUB_URL", "http://localhost:5050"))
     parser.add_argument("--content", default=None, help="path to content.json (default: ../robot-revolution/content.json)")
@@ -1123,15 +1605,16 @@ def main() -> None:
                               "or config.yaml's rogue_video)")
     args = parser.parse_args()
 
-    screen = ChatbotScreen(enabled=not args.no_screen)
+    cfg = load_show_host_config()
+    music_path = resolve_optional_path(cfg, "rogue_music")
+    screen = ChatbotScreen(enabled=not args.no_screen, music_path=music_path)
     try:
         content = load_content(args.content)
-        cfg = load_show_host_config()
         live = fetch_live_data(cfg)
         rise_video_path = resolve_video_path(args.video, cfg, "rise_video", DEFAULT_VIDEO)
         rogue_video_path = resolve_video_path(args.rogue_video, cfg, "rogue_video", DEFAULT_ROGUE_VIDEO)
         voice = Voice(screen)
-        listener = VoiceListener()
+        listener = VoiceListener(screen)
         hub = HubClient(args.hub_url)
 
         ignite_keyword = content["ignite"].get("keyword", "IGNITE").rstrip(".")

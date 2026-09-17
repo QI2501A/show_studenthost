@@ -19,3 +19,15 @@ venue_tz: Asia/Singapore
 # (currently a placeholder, to be swapped for the real cut later) — override
 # here, or per-run with `python Dialogue.py --rogue-video /path/to/file.mp4`.
 # rogue_video: ../DH_Asset6_RobotRevolution.mp4
+
+# Optional menacing background music, looped on the chatbot screen for the
+# whole red "system has taken over" phase — starts the instant the screen
+# turns red (the rogue "taking over" line) and stops the instant OVERRIDE is
+# confirmed and the screen goes back to green. No royalty-free/licensed
+# track ships with this repo (a real "Terminator-style" cue is copyrighted —
+# supply your own licensed file), so without this set the chatbot screen
+# falls back to a synthesized ominous drone (Web Audio, generated in the
+# browser, no file needed) so the effect still works out of the box. Drop a
+# real track in and point this at it to replace that fallback. Relative
+# paths resolve from this show_host/ folder.
+# rogue_music: ../rogue_theme.mp3

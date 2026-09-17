@@ -3,6 +3,13 @@
 <head>
 <meta charset="utf-8">
 <title>Show Host — Chatbot Channel</title>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.min.js"
+  }
+}
+</script>
 <style>
   :root {
     --fg: #00ff41;
@@ -30,23 +37,63 @@
     height: 100%;
     display: block;
   }
+
+  /* --- Terminal-styled panel shell, shared by the two response panels --- */
   .panel {
     position: fixed;
-    inset: 6% 8%;
-    background: rgba(0, 0, 0, 0.55);
+    top: 50%;
+    transform: translateY(-50%);
+    max-height: 78vh;
+    background: rgba(0, 0, 0, 0.6);
     border: 1px solid var(--border);
     box-shadow: 0 0 60px var(--panel-glow) inset;
-    padding: 32px 36px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    transition: border-color 0.4s, box-shadow 0.4s;
+  }
+  .term-titlebar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--border);
+    font-family: Menlo, Consolas, "Courier New", monospace;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    color: var(--fg);
+    opacity: 0.7;
+  }
+  .term-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--fg);
+    opacity: 0.5;
+  }
+  .term-title { margin-left: 4px; }
+  .term-body {
+    flex: 1 1 auto;
     overflow-y: auto;
     box-sizing: border-box;
+    padding: 20px 24px;
     font-family: Menlo, Consolas, "Courier New", monospace;
-    font-size: clamp(16px, 2.2vw, 30px);
-    line-height: 1.55;
+    line-height: 1.5;
     color: var(--fg);
     text-shadow: 0 0 6px var(--fg-glow);
     white-space: pre-wrap;
-    transition: color 0.4s, border-color 0.4s, box-shadow 0.4s;
   }
+
+  /* Centre: the chatbot's own answers — the main event. */
+  #panel {
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 34vw;
+    min-width: 300px;
+    max-width: 620px;
+  }
+  #panel .term-body { font-size: clamp(15px, 1.5vw, 24px); }
   #cursor {
     display: inline-block;
     width: 0.55em;
@@ -55,6 +102,35 @@
     animation: blink 1s steps(1) infinite;
   }
   @keyframes blink { 50% { opacity: 0; } }
+
+  /* Left: what the mic hears the student say -- a secondary log, smaller. */
+  #heardPanel {
+    left: 3%;
+    width: 24vw;
+    min-width: 240px;
+    max-width: 420px;
+    opacity: 0.85;
+  }
+  #heardPanel .term-body { font-size: clamp(12px, 1.05vw, 17px); opacity: 0.9; }
+
+  /* Right third: the humanoid head -- a Three.js digital-rain skull built
+     in a separate session (js/skull/skullApp.js), mounted into this
+     container below. Its own <canvas> fills this box; initSkull() reads
+     clientWidth/clientHeight from it, so the size/position live here. */
+  #headContainer {
+    position: fixed;
+    right: 5%;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 24vw;
+    max-width: 340px;
+    min-width: 160px;
+    aspect-ratio: 3 / 4;
+    box-sizing: border-box;
+    overflow: hidden;
+    filter: drop-shadow(0 0 16px var(--fg-glow));
+  }
+
   #showVideo {
     display: none;
     position: fixed;
@@ -85,13 +161,120 @@
     animation: pulse 1.6s ease-in-out infinite;
   }
   @keyframes pulse { 50% { opacity: 0.55; } }
+
+  #overrideHint {
+    position: fixed;
+    right: 18px;
+    bottom: 14px;
+    z-index: 500;
+    font-family: Menlo, Consolas, "Courier New", monospace;
+    font-size: 12px;
+    color: var(--fg);
+    opacity: 0.22;
+    cursor: pointer;
+    user-select: none;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    transition: opacity 0.15s;
+  }
+  #overrideHint:hover { opacity: 0.6; }
+  #overrideHint.flash { opacity: 1; color: var(--fg); }
+
+  /* --- OVERRIDE: a movie-style "key in the code" prompt, red-phase only --- */
+  #overrideCommand {
+    position: fixed;
+    left: 50%;
+    bottom: 26px;
+    transform: translateX(-50%);
+    z-index: 500;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    font-family: Menlo, Consolas, "Courier New", monospace;
+    color: #ff3b30;
+    background: rgba(0, 0, 0, 0.72);
+    border: 1px solid #ff3b30;
+    border-radius: 6px;
+    padding: 14px 32px 12px;
+    animation: overridePulse 1.6s ease-in-out infinite;
+  }
+  body[data-theme="red"] #overrideCommand { display: flex; }
+  @keyframes overridePulse {
+    0%, 100% { box-shadow: 0 0 8px rgba(255, 59, 48, 0.4); }
+    50% { box-shadow: 0 0 24px rgba(255, 59, 48, 0.85); }
+  }
+  .oc-label {
+    font-size: 11px;
+    letter-spacing: 3px;
+    opacity: 0.85;
+  }
+  .oc-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 19px;
+  }
+  .oc-prompt { opacity: 0.8; }
+  #overrideInput {
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid #ff3b30;
+    outline: none;
+    color: #ff3b30;
+    font: inherit;
+    letter-spacing: 5px;
+    text-transform: uppercase;
+    text-align: center;
+    width: 230px;
+    text-shadow: 0 0 8px rgba(255, 59, 48, 0.6);
+    caret-color: #ff3b30;
+  }
+  .oc-status {
+    font-size: 11px;
+    letter-spacing: 2px;
+    min-height: 13px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .oc-status.show { opacity: 1; }
 </style>
 </head>
 <body>
   <canvas id="rain"></canvas>
-  <div class="panel" id="panel"><span id="output"></span><span id="cursor">&nbsp;</span></div>
+
+  <div class="panel" id="heardPanel">
+    <div class="term-titlebar">
+      <span class="term-dot"></span><span class="term-dot"></span><span class="term-dot"></span>
+      <span class="term-title">mic@dronehub-hub:~#</span>
+    </div>
+    <div class="term-body" id="heardBody"><span id="heardOutput"></span></div>
+  </div>
+
+  <div class="panel" id="panel">
+    <div class="term-titlebar">
+      <span class="term-dot"></span><span class="term-dot"></span><span class="term-dot"></span>
+      <span class="term-title">chatbot@dronehub-hub:~#</span>
+    </div>
+    <div class="term-body" id="termBody"><span id="output"></span><span id="cursor">&nbsp;</span></div>
+  </div>
+
+  <div id="headContainer"></div>
+
   <video id="showVideo" playsinline></video>
+  <audio id="rogueMusic" loop preload="none"></audio>
+
   <div id="startOverlay"><div class="msg">&gt; CLICK TO ACTIVATE SYSTEM CHANNEL<br>(enters full-screen)</div></div>
+  <div id="overrideHint" title="Manual override: confirms the current cue if voice wasn't detected">SPACE = confirm cue</div>
+  <div id="overrideCommand">
+    <div class="oc-label">SYSTEM OVERRIDE — ENTER CODE</div>
+    <div class="oc-line">
+      <span class="oc-prompt">&gt;</span>
+      <input id="overrideInput" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="40">
+    </div>
+    <div class="oc-status" id="overrideStatus">ACCESS DENIED</div>
+  </div>
 
   <script>
     // A page can't put itself into full-screen on load — browsers require an
@@ -100,7 +283,9 @@
     // launch). It must NOT stay up if nobody clicks it, though — when kiosk
     // mode *did* launch, no click is coming, and this would otherwise sit on
     // top of the chatbot text and video forever. So it auto-dismisses on its
-    // own after a few seconds either way.
+    // own after a few seconds either way. This click is also what typically
+    // "unlocks" audio autoplay (background music) for the rest of the
+    // page's life, in browsers that require a user gesture.
     const startOverlay = document.getElementById('startOverlay');
     function dismissOverlay() {
       startOverlay.style.display = 'none';
@@ -112,6 +297,62 @@
       dismissOverlay();
     });
     setTimeout(dismissOverlay, 6000);
+  </script>
+  <script>
+    // --- Manual override, triggered from THIS screen ---
+    // This is what the operator is actually looking at for nearly the whole
+    // show (the kiosk browser window has focus, not the hidden terminal
+    // behind it), so the override needs to be reachable from right here,
+    // not only via a keypress at a terminal window that may never have
+    // focus. SPACE (or ENTER), or a tap on the corner hint, posts /override;
+    // Dialogue.py's wait_for_line/wait_for_keyword poll for it and treat it
+    // exactly like a manual "yes, move on" confirmation.
+    const overrideHint = document.getElementById('overrideHint');
+    let overrideInFlight = false;
+    function sendOverride() {
+      if (overrideInFlight) return;
+      overrideInFlight = true;
+      overrideHint.classList.add('flash');
+      fetch('/override', { method: 'POST' })
+        .catch(() => {})
+        .finally(() => {
+          setTimeout(() => { overrideHint.classList.remove('flash'); overrideInFlight = false; }, 300);
+        });
+    }
+    document.addEventListener('keydown', (e) => {
+      if (e.target && e.target.id === 'overrideInput') return; // typing the OVERRIDE code, not a cue-confirm
+      if (e.code === 'Space' || e.code === 'Enter') {
+        e.preventDefault();
+        sendOverride();
+      }
+    });
+    overrideHint.addEventListener('click', sendOverride);
+
+    // --- OVERRIDE: key in the code, like a movie override panel ---
+    // Only shown once the screen is red. Not a button — the student types
+    // the actual OVERRIDE keyword into this field and presses Enter; the
+    // text is validated server-side in Dialogue.py's run_override() exactly
+    // like the terminal path is, so a wrong code is rejected the same way.
+    const overrideCommandEl = document.getElementById('overrideCommand');
+    const overrideInputEl = document.getElementById('overrideInput');
+    const overrideStatusEl = document.getElementById('overrideStatus');
+    function submitOverrideCode() {
+      const text = overrideInputEl.value;
+      if (!text.trim()) return;
+      fetch('/confirm-override-command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      }).catch(() => {});
+      overrideInputEl.value = '';
+    }
+    overrideInputEl.addEventListener('keydown', (e) => {
+      e.stopPropagation(); // don't let this typing also fire the SPACE/ENTER cue-confirm above
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        submitOverrideCode();
+      }
+    });
   </script>
   <script>
     // --- Digital rain background ---
@@ -144,9 +385,14 @@
     }
     setInterval(drawRain, 60);
 
-    // --- Typewriter display, driven by polling /state ---
+    // --- Typewriter display (chatbot's own answers), driven by /state ---
     const outputEl = document.getElementById('output');
     const panelEl = document.getElementById('panel');
+    const termBodyEl = document.getElementById('termBody');
+    const heardPanelEl = document.getElementById('heardPanel');
+    const heardOutputEl = document.getElementById('heardOutput');
+    const heardBodyEl = document.getElementById('heardBody');
+    const headContainerEl = document.getElementById('headContainer');
     const videoEl = document.getElementById('showVideo');
     const PARAGRAPH_PAUSE_MS = 1100; // matches Voice.PARAGRAPH_PAUSE_S in Dialogue.py
     const MIN_CHAR_MS = 18;   // never type faster than this, even for a very long line
@@ -154,6 +400,8 @@
 
     let lastSeq = -1;
     let lastClearSeq = -1;
+    let lastHeardSeq = -1;
+    let lastOverrideFeedbackSeq = -1;
     let queue = [];
     let typing = false;
     let rateWpm = 165;
@@ -163,11 +411,105 @@
 
     function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
+    // --- Rogue-phase background music ---
+    // Prefers a real licensed track (server-configured via config.yaml's
+    // rogue_music, served at /music) if one exists; otherwise synthesizes an
+    // ominous drone with the Web Audio API so the effect works with no file
+    // at all. Starts the instant the screen turns red, stops the instant it
+    // turns back to green (OVERRIDE confirmed).
+    const rogueMusicEl = document.getElementById('rogueMusic');
+    let hasMusicFile = false;
+    let musicSrcSet = false;
+    let synthCtx = null;
+    let synthNodes = null;
+
+    function startMenacingMusic() {
+      if (hasMusicFile) {
+        if (!musicSrcSet) { rogueMusicEl.src = '/music'; musicSrcSet = true; }
+        rogueMusicEl.currentTime = 0;
+        rogueMusicEl.volume = 0.5;
+        rogueMusicEl.play().catch(() => {});
+        return;
+      }
+      if (synthCtx) return;
+      try {
+        synthCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const now = synthCtx.currentTime;
+        const master = synthCtx.createGain();
+        master.gain.setValueAtTime(0, now);
+        master.gain.linearRampToValueAtTime(0.3, now + 1.5);
+        master.connect(synthCtx.destination);
+
+        const drone = synthCtx.createOscillator();
+        drone.type = 'sawtooth';
+        drone.frequency.value = 55; // low ominous drone
+        const droneFilter = synthCtx.createBiquadFilter();
+        droneFilter.type = 'lowpass';
+        droneFilter.frequency.value = 280;
+        drone.connect(droneFilter).connect(master);
+        drone.start();
+
+        const pulseOsc = synthCtx.createOscillator();
+        pulseOsc.type = 'sine';
+        pulseOsc.frequency.value = 110;
+        const pulseGain = synthCtx.createGain();
+        pulseGain.gain.value = 0;
+        pulseOsc.connect(pulseGain).connect(master);
+        pulseOsc.start();
+
+        const pulseTimer = setInterval(() => {
+          if (!synthCtx) { clearInterval(pulseTimer); return; }
+          const t = synthCtx.currentTime;
+          pulseGain.gain.cancelScheduledValues(t);
+          pulseGain.gain.setValueAtTime(0.3, t);
+          pulseGain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+        }, 700);
+
+        synthNodes = { master, drone, pulseOsc, pulseTimer };
+      } catch (e) {
+        // Web Audio unsupported/blocked -- show still runs silently
+      }
+    }
+
+    function stopMenacingMusic() {
+      if (hasMusicFile) {
+        rogueMusicEl.pause();
+        return;
+      }
+      if (!synthCtx) return;
+      const ctxRef = synthCtx;
+      const nodes = synthNodes;
+      const now = ctxRef.currentTime;
+      try {
+        nodes.master.gain.cancelScheduledValues(now);
+        nodes.master.gain.setValueAtTime(nodes.master.gain.value, now);
+        nodes.master.gain.linearRampToValueAtTime(0, now + 0.8);
+        clearInterval(nodes.pulseTimer);
+        setTimeout(() => {
+          try { nodes.drone.stop(); nodes.pulseOsc.stop(); ctxRef.close(); } catch (e) {}
+        }, 900);
+      } catch (e) {
+        // ignore -- worst case the drone keeps ringing briefly
+      }
+      synthCtx = null;
+      synthNodes = null;
+    }
+
     function applyTheme(theme) {
       if (theme === currentTheme) return;
       currentTheme = theme;
       document.body.dataset.theme = theme;
       rainColor = THEME_RAIN_COLORS[theme] || THEME_RAIN_COLORS.green;
+      if (window.__skullHead) window.__skullHead.setTheme(rainColor);
+      if (theme === 'red') {
+        startMenacingMusic();
+        setTimeout(() => overrideInputEl.focus(), 60);
+      } else {
+        stopMenacingMusic();
+        overrideInputEl.value = '';
+        overrideInputEl.blur();
+        overrideStatusEl.classList.remove('show');
+      }
     }
 
     // Only one tab/window should ever play the video's audio or type text —
@@ -185,6 +527,7 @@
           active = false;
           videoEl.muted = true;
           try { videoEl.pause(); } catch (err) {}
+          stopMenacingMusic();
           dismissOverlay();
           document.body.style.filter = 'grayscale(1) brightness(0.35)';
           outputEl.textContent = '(inactive — another Chatbot Screen window is live)';
@@ -237,6 +580,9 @@
       });
     }
 
+    // Each entry in `segments` is now already one SENTENCE (or one terminal
+    // line, for the post-OVERRIDE command mirror) from Dialogue.py — so
+    // every entry gets its own visual line here, not just a pause.
     async function typeUtterance(segments, generation) {
       if (generation !== typingGeneration) return;
       if (outputEl.textContent.length > 0) outputEl.textContent += '\n\n';
@@ -245,10 +591,11 @@
         await typeText(segments[i], generation);
         if (generation !== typingGeneration) return;
         if (i < segments.length - 1) {
-          outputEl.textContent += '  ';
+          outputEl.textContent += '\n';
           await sleep(PARAGRAPH_PAUSE_MS);
         }
       }
+      termBodyEl.scrollTop = termBodyEl.scrollHeight;
     }
 
     async function processQueue() {
@@ -262,6 +609,8 @@
     function enterVideoMode() {
       mode = 'video';
       panelEl.style.display = 'none';
+      heardPanelEl.style.display = 'none';
+      headContainerEl.style.display = 'none';
       canvas.style.display = 'none';
       videoEl.style.display = 'block';
       if (!active) return; // inactive tab: stay silent and paused, see BroadcastChannel setup above
@@ -278,6 +627,8 @@
       videoEl.load();
       videoEl.style.display = 'none';
       panelEl.style.display = '';
+      heardPanelEl.style.display = '';
+      headContainerEl.style.display = '';
       canvas.style.display = '';
     }
 
@@ -291,6 +642,8 @@
         const res = await fetch('/state', { cache: 'no-store' });
         const data = await res.json();
         if (typeof data.rate_wpm === 'number' && data.rate_wpm > 0) rateWpm = data.rate_wpm;
+        if (typeof data.has_music_file === 'boolean') hasMusicFile = data.has_music_file;
+        if (typeof data.speaking === 'boolean' && window.__skullHead) window.__skullHead.setSpeaking(data.speaking);
         if (data.theme) applyTheme(data.theme);
 
         if (typeof data.clear_seq === 'number' && data.clear_seq !== lastClearSeq) {
@@ -315,12 +668,48 @@
             if (!typing) processQueue();
           }
         }
+
+        // Left panel: what the mic heard the student say — appended as its
+        // own entry each time, independent of the chatbot's own typewriter.
+        if (typeof data.heard_seq === 'number' && data.heard_seq !== lastHeardSeq) {
+          lastHeardSeq = data.heard_seq;
+          if (data.heard_segments && data.heard_segments.length) {
+            if (heardOutputEl.textContent.length > 0) heardOutputEl.textContent += '\n\n';
+            heardOutputEl.textContent += '> ' + data.heard_segments.join(' ');
+            heardBodyEl.scrollTop = heardBodyEl.scrollHeight;
+          }
+        }
+
+        // OVERRIDE code field: flash "ACCESS DENIED" for a wrong code.
+        if (typeof data.override_feedback_seq === 'number' && data.override_feedback_seq !== lastOverrideFeedbackSeq) {
+          lastOverrideFeedbackSeq = data.override_feedback_seq;
+          if (data.override_feedback_ok === false) {
+            overrideStatusEl.classList.add('show');
+            setTimeout(() => overrideStatusEl.classList.remove('show'), 1100);
+          }
+        }
       } catch (e) {
         // server not up yet, or a hiccup — just try again next tick
       }
       setTimeout(poll, 250);
     }
     poll();
+  </script>
+  <script type="module">
+    // --- The humanoid head: digital-rain skull, built in a separate
+    // session (js/skull/skullApp.js), mounted here. window.__skullHead is
+    // read defensively (may still be null) by the classic poll()/
+    // applyTheme() above, since module scripts execute after the document
+    // has parsed — those two just skip the call until this has finished.
+    import { initSkull } from './js/skull/skullApp.js';
+    try {
+      // color defaults to '#00ff41', matching THEME_RAIN_COLORS.green below —
+      // applyTheme() takes over from here on every actual theme change.
+      window.__skullHead = initSkull({ container: document.getElementById('headContainer') });
+    } catch (e) {
+      console.warn('[head] Three.js skull unavailable:', e);
+      window.__skullHead = null;
+    }
   </script>
 </body>
 </html>
