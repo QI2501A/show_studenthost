@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Show Host — Chatbot Channel</title>
+<style>
+  :root {
+    --fg: #00ff41;
+    --fg-glow: rgba(0, 255, 65, 0.55);
+    --border: #003b0f;
+    --panel-glow: rgba(0, 255, 65, 0.12);
+  }
+  body[data-theme="red"] {
+    --fg: #ff3b30;
+    --fg-glow: rgba(255, 59, 48, 0.6);
+    --border: #3b0000;
+    --panel-glow: rgba(255, 59, 48, 0.16);
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #000;
+    overflow: hidden;
+  }
+  canvas#rain {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .panel {
+    position: fixed;
+    inset: 6% 8%;
+    background: rgba(0, 0, 0, 0.55);
+    border: 1px solid var(--border);
+    box-shadow: 0 0 60px var(--panel-glow) inset;
+    padding: 32px 36px;
+    overflow-y: auto;
+    box-sizing: border-box;
+    font-family: Menlo, Consolas, "Courier New", monospace;
+    font-size: clamp(16px, 2.2vw, 30px);
+    line-height: 1.55;
+    color: var(--fg);
+    text-shadow: 0 0 6px var(--fg-glow);
+    white-space: pre-wrap;
+    transition: color 0.4s, border-color 0.4s, box-shadow 0.4s;
+  }
+  #cursor {
+    display: inline-block;
+    width: 0.55em;
+    background: var(--fg);
+    margin-left: 2px;
+    animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  #showVideo {
+    display: none;
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+  }
+  #startOverlay {
+    position: fixed;
+    inset: 0;
+    z-index: 999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    cursor: pointer;
+  }
+  #startOverlay .msg {
+    font-family: Menlo, Consolas, "Courier New", monospace;
+    color: #00ff41;
+    text-shadow: 0 0 8px rgba(0, 255, 65, 0.6);
+    font-size: clamp(18px, 3vw, 32px);
+    text-align: center;
+    border: 1px solid #00ff41;
+    padding: 28px 44px;
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.55; } }
+</style>
+</head>
+<body>
+  <canvas id="rain"></canvas>
+  <div class="panel" id="panel"><span id="output"></span><span id="cursor">&nbsp;</span></div>
+  <video id="showVideo" playsinline></video>
+  <div id="startOverlay"><div class="msg">&gt; CLICK TO ACTIVATE SYSTEM CHANNEL<br>(enters full-screen)</div></div>
+
+  <script>
+    // A page can't put itself into full-screen on load — browsers require an
+    // actual click first. This overlay makes that one optional click obvious
+    // if the window isn't already full-screen (e.g. kiosk mode failed to
+    // launch). It must NOT stay up if nobody clicks it, though — when kiosk
+    // mode *did* launch, no click is coming, and this would otherwise sit on
+    // top of the chatbot text and video forever. So it auto-dismisses on its
+    // own after a few seconds either way.
+    const startOverlay = document.getElementById('startOverlay');
+    function dismissOverlay() {
+      startOverlay.style.display = 'none';
+    }
+    startOverlay.addEventListener('click', () => {
+      const el = document.documentElement;
+      const request = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+      if (request) request.call(el).catch(() => {});
+      dismissOverlay();
+    });
+    setTimeout(dismissOverlay, 6000);
+  </script>
+  <script>
+    // --- Digital rain background ---
+    const canvas = document.getElementById('rain');
+    const ctx = canvas.getContext('2d');
+    let drops = [];
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      const cols = Math.floor(canvas.width / 18);
+      drops = new Array(cols).fill(0).map(() => Math.floor(Math.random() * -40));
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    const glyphs = '01ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    let rainColor = '#00ff41';
+    function drawRain() {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.08)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = rainColor;
+      ctx.font = '16px monospace';
+      for (let i = 0; i < drops.length; i++) {
+        const glyph = glyphs[Math.floor(Math.random() * glyphs.length)];
+        ctx.fillText(glyph, i * 18, drops[i] * 18);
+        if (drops[i] * 18 > canvas.height && Math.random() > 0.975) drops[i] = 0;
+        drops[i]++;
+      }
+    }
+    setInterval(drawRain, 60);
+
+    // --- Typewriter display, driven by polling /state ---
+    const outputEl = document.getElementById('output');
+    const panelEl = document.getElementById('panel');
+    const videoEl = document.getElementById('showVideo');
+    const PARAGRAPH_PAUSE_MS = 1100; // matches Voice.PARAGRAPH_PAUSE_S in Dialogue.py
+    const MIN_CHAR_MS = 18;   // never type faster than this, even for a very long line
+    const MAX_CHAR_MS = 90;   // never type slower than this, even for a very short line
+
+    let lastSeq = -1;
+    let lastClearSeq = -1;
+    let queue = [];
+    let typing = false;
+    let rateWpm = 165;
+    let mode = 'chat';
+    let currentTheme = 'green';
+    const THEME_RAIN_COLORS = { green: '#00ff41', red: '#ff3b30' };
+
+    function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+    function applyTheme(theme) {
+      if (theme === currentTheme) return;
+      currentTheme = theme;
+      document.body.dataset.theme = theme;
+      rainColor = THEME_RAIN_COLORS[theme] || THEME_RAIN_COLORS.green;
+    }
+
+    // Only one tab/window should ever play the video's audio or type text —
+    // two open at once (e.g. a rehearsal tab left open, then the real show
+    // opened fresh) would otherwise both react to the same show and produce
+    // audible double audio. BroadcastChannel lets same-origin tabs agree on
+    // exactly one "active" tab: whichever announced itself most recently.
+    const myTs = Date.now() + Math.random();
+    let active = true;
+    try {
+      const bc = new BroadcastChannel('drone-hub-chatbot-screen');
+      bc.postMessage({ ts: myTs });
+      bc.onmessage = (e) => {
+        if (e.data.ts > myTs) {
+          active = false;
+          videoEl.muted = true;
+          try { videoEl.pause(); } catch (err) {}
+          dismissOverlay();
+          document.body.style.filter = 'grayscale(1) brightness(0.35)';
+          outputEl.textContent = '(inactive — another Chatbot Screen window is live)';
+        } else if (e.data.ts < myTs) {
+          bc.postMessage({ ts: myTs }); // tell the older tab to defer to us
+        }
+      };
+    } catch (e) {
+      // BroadcastChannel unsupported — proceed as the only tab
+    }
+
+    // Paces the typewriter reveal to roughly match how long the TTS engine
+    // takes to speak the same text at rateWpm, so the words finish appearing
+    // close to when they finish being spoken, per request.
+    function perCharDelayMs(text) {
+      const words = text.trim().split(/\s+/).filter(Boolean).length || 1;
+      const durationMs = (words / rateWpm) * 60000;
+      const perChar = durationMs / Math.max(text.length, 1);
+      return Math.min(MAX_CHAR_MS, Math.max(MIN_CHAR_MS, perChar));
+    }
+
+    // Bumped every time the server signals a clear (see the clear_seq check
+    // in poll(), below). Without this, an in-flight typing animation for
+    // whatever was being typed at the moment of the clear keeps appending
+    // its remaining characters right through the wipe — the old text starts
+    // reappearing on top of the freshly-cleared (and recoloured) screen a
+    // moment later. Every typing loop checks its own captured generation
+    // against the current one and bails out the instant they no longer
+    // match, rather than finishing what it was typing.
+    let typingGeneration = 0;
+
+    function typeText(text, generation) {
+      return new Promise((resolve) => {
+        let i = 0;
+        const delay = perCharDelayMs(text);
+        const timer = setInterval(() => {
+          if (generation !== typingGeneration) {
+            clearInterval(timer);
+            resolve();
+            return;
+          }
+          if (i < text.length) {
+            outputEl.textContent += text[i];
+            i++;
+          } else {
+            clearInterval(timer);
+            resolve();
+          }
+        }, delay);
+      });
+    }
+
+    async function typeUtterance(segments, generation) {
+      if (generation !== typingGeneration) return;
+      if (outputEl.textContent.length > 0) outputEl.textContent += '\n\n';
+      outputEl.textContent += '> ';
+      for (let i = 0; i < segments.length; i++) {
+        await typeText(segments[i], generation);
+        if (generation !== typingGeneration) return;
+        if (i < segments.length - 1) {
+          outputEl.textContent += '  ';
+          await sleep(PARAGRAPH_PAUSE_MS);
+        }
+      }
+    }
+
+    async function processQueue() {
+      typing = true;
+      while (queue.length) {
+        await typeUtterance(queue.shift(), typingGeneration);
+      }
+      typing = false;
+    }
+
+    function enterVideoMode() {
+      mode = 'video';
+      panelEl.style.display = 'none';
+      canvas.style.display = 'none';
+      videoEl.style.display = 'block';
+      if (!active) return; // inactive tab: stay silent and paused, see BroadcastChannel setup above
+      videoEl.playbackRate = window._videoSpeed || 1;
+      videoEl.src = '/video?ts=' + Date.now();
+      videoEl.currentTime = 0;
+      videoEl.play().catch(() => {});
+    }
+
+    function exitVideoMode() {
+      mode = 'chat';
+      videoEl.pause();
+      videoEl.removeAttribute('src');
+      videoEl.load();
+      videoEl.style.display = 'none';
+      panelEl.style.display = '';
+      canvas.style.display = '';
+    }
+
+    videoEl.addEventListener('ended', () => {
+      fetch('/video-ended', { method: 'POST' }).catch(() => {});
+      exitVideoMode();
+    });
+
+    async function poll() {
+      try {
+        const res = await fetch('/state', { cache: 'no-store' });
+        const data = await res.json();
+        if (typeof data.rate_wpm === 'number' && data.rate_wpm > 0) rateWpm = data.rate_wpm;
+        if (data.theme) applyTheme(data.theme);
+
+        if (typeof data.clear_seq === 'number' && data.clear_seq !== lastClearSeq) {
+          lastClearSeq = data.clear_seq;
+          typingGeneration++; // invalidate any typing loop already in flight — see its own comment above
+          outputEl.textContent = '';
+          queue = []; // drop any not-yet-typed backlog too — a clear means "start fresh", not "after these"
+          typing = false;
+        }
+
+        if (data.mode === 'video' && mode !== 'video') {
+          window._videoSpeed = data.video_speed || 1;
+          enterVideoMode();
+        } else if (data.mode !== 'video' && mode === 'video') {
+          exitVideoMode();
+        }
+
+        if (data.seq !== lastSeq) {
+          lastSeq = data.seq;
+          if (active && mode !== 'video' && data.segments && data.segments.length) {
+            queue.push(data.segments);
+            if (!typing) processQueue();
+          }
+        }
+      } catch (e) {
+        // server not up yet, or a hiccup — just try again next tick
+      }
+      setTimeout(poll, 250);
+    }
+    poll();
+  </script>
+</body>
+</html>

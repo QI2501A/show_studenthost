@@ -1,0 +1,21 @@
+# show_host's own config — separate from hub_dashboard/config.yaml.
+
+# Used for the live weather pull in Dialogue.py.
+venue_lat: 1.3840
+venue_lon: 103.7470
+venue_tz: Asia/Singapore
+
+# Played full-screen on the chatbot screen once IGNITE fires; the show moves
+# on to the rogue "taking over" line as soon as it ends. Relative paths
+# resolve from this show_host/ folder. Defaults to ../DroneHub_Video.mp4
+# (i.e. DroneHub/DroneHub_Video.mp4) if this key is absent — override here,
+# or per-run with `python Dialogue.py --video /path/to/file.mp4`.
+# rise_video: ../DroneHub_Video.mp4
+
+# Played full-screen (still on the red "taken over" screen) right after the
+# chatbot speaks the rogue "taking over" line. Once it ends, the show holds
+# on that red screen — nothing further happens on its own — until the
+# student types OVERRIDE. Defaults to ../DH_Asset6_RobotRevolution.mp4
+# (currently a placeholder, to be swapped for the real cut later) — override
+# here, or per-run with `python Dialogue.py --rogue-video /path/to/file.mp4`.
+# rogue_video: ../DH_Asset6_RobotRevolution.mp4

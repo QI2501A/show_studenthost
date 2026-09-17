@@ -1,0 +1,11 @@
+# show_host's own dependencies — separate from hub_dashboard/requirements.txt.
+# All optional: each feature degrades to a console/typed-input fallback on
+# its own if the package (or the mic/speaker hardware) isn't available.
+PyYAML>=6.0,<7               # reads show_host/config.yaml (venue coordinates)
+
+SpeechRecognition>=3.10,<4   # live mic listening for the IGNITE/OVERRIDE keywords
+PyAudio>=0.2.13              # mic access for SpeechRecognition
+  # macOS: brew install portaudio   (before pip install works)
+
+pyttsx3>=2.90,<3             # offline text-to-speech for the chatbot's lines
+  # macOS: pip install pyobjc       (pyttsx3's NSSpeechSynthesizer backend)
