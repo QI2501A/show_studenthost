@@ -45,6 +45,13 @@ Pass `--no-screen` to skip it (text-only environments, or a quick rehearsal in o
 
 Loops for the whole red "system has taken over" phase — starts the instant the screen turns red, stops the instant OVERRIDE is confirmed. No royalty-free or licensed "menacing theme" ships with this repo (an actual movie theme is copyrighted — bring your own licensed file), so out of the box the chatbot screen synthesizes an ominous drone with the Web Audio API instead, entirely in the browser, no file needed. Drop a real track in and set `rogue_music:` in `config.yaml` to it to use that instead — see the comment there.
 
+## Rogue-phase sirens and voices
+
+- **Sirens.** The instant the screen turns red, layered sirens start on top of the drone/music (all synthesized in the browser with Web Audio, no files): two detuned wailing sirens and a two-tone "nee-naw" alarm as a constant bed, plus randomly scheduled one-shots — pitch dives, rising whoops, rapid alarm trains, static bursts, stutters — at random pitches and stereo positions. The scheduler gets busier over the first ~10 seconds, so it builds into chaos. Sirens duck to ~40% while the chatbot is speaking or a video is playing, so the voice and video stay audible, and stop the moment OVERRIDE is confirmed. Overall loudness is `SIREN_LEVEL` in `screen.html`.
+- **Scarier voice for the takeover line.** `voicefx.rogue_voice`: the TTS is rendered to audio, slowed and pitched down, doubled with a much deeper copy, ring-modulated, glitch-stuttered, distorted and echoed.
+- **Commands read out on OVERRIDE.** While the recovery commands type on screen, the system reads them aloud (`speak_override_readout` in `Dialogue.py`, which turns `assert_control(engineer_id=01)` into "assert control, engineer I D zero 1") in a "dying transformer taken over by code" voice (`voicefx.dying_transformer`): pitch and speed sag with a growing motor wobble while bit-crush, sample-hold, ring-mod, dropouts, stutters, static and data chirps take over, ending in a power-down whine. The corruption builds across the lines, then the next chatbot line ("Manual control confirmed...") is back in the normal voice.
+- Both voice effects need `numpy` and run on Windows (SAPI → WAV → `winsound`). If numpy is missing or anything fails they fall back to the plain voice at a slower rate, never silence. On macOS the same lines use `say`'s own pitch commands instead.
+
 ## The two videos
 
 Both play full-screen on the chatbot screen and **block until they actually finish** — the timing of the next beat follows the video's real length rather than a fixed estimate, using the same mechanism for each:
@@ -131,6 +138,7 @@ python Dialogue.py --no-screen                       # skip the chatbot screen (
 ```
 Dialogue.py        The chatbot: live data, TTS, listens for student cues, spawns main.py on IGNITE, calls hub_dashboard to stop on OVERRIDE
 main.py            Fired by Dialogue.py once IGNITE is heard — signals hub_dashboard (POST /api/show/start) then exits
+voicefx.py         Audio effects for the rogue voice and the "dying transformer" command readout (needs numpy; optional)
 screen.html        The chatbot screen's page — served locally by Dialogue.py, opened in your browser automatically
 js/skull/          The humanoid head: a Three.js digital-rain skull (separate build), mounted by screen.html
 vendor/three/      Three.js r160 + the addons the head build needs (MeshSurfaceSampler, EffectComposer/RenderPass/UnrealBloomPass/OutputPass + their shader deps) — vendored, no npm install required

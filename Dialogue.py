@@ -51,6 +51,7 @@ import socketserver
 import string
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -1020,15 +1021,16 @@ class Voice:
             return
         ready.set()
         while True:
-            text, done, result = self._tts_queue.get()
+            text, done, result, style, intensity = self._tts_queue.get()
             try:
                 engine = Engine(None, False)
                 try:
-                    engine.setProperty("rate", self.RATE_WPM)
+                    engine.setProperty("rate", self.STYLE_RATE_WPM.get(style, self.RATE_WPM))
                     if voice_id:
                         engine.setProperty("voice", voice_id)
-                    engine.say(text)
-                    engine.runAndWait()
+                    if not (style and self._speak_styled(engine, text, style, intensity)):
+                        engine.say(text)
+                        engine.runAndWait()
                 finally:
                     try:
                         engine.stop()
@@ -1037,6 +1039,57 @@ class Voice:
             except Exception as exc:
                 result["error"] = exc
             done.set()
+
+    # Slower than the normal voice for the menacing styles -- also what you
+    # get on its own if the audio effects below can't run (no numpy etc.).
+    STYLE_RATE_WPM = {"rogue": 128, "dying": 170}  # dying: voicefx stretches it ~1.5x, so start brisk
+
+    def _speak_styled(self, engine, text: str, style: str, intensity: float) -> bool:
+        """Renders `text` to a WAV with the SAPI voice, runs it through the
+        matching voicefx effect and plays the result (blocking until done).
+        Runs on the TTS worker thread. Returns False if anything isn't
+        available (not Windows, no numpy, odd WAV format) so the caller can
+        fall back to the plain voice -- a missing effect must never mean
+        silence."""
+        if sys.platform != "win32":
+            return False
+        raw_path = out_path = None
+        try:
+            import winsound
+            import voicefx
+
+            fd, raw_path = tempfile.mkstemp(suffix=".wav", prefix="chatbot_raw_")
+            os.close(fd)
+            engine.save_to_file(text, raw_path)
+            engine.runAndWait()
+            samples, rate = voicefx.read_wav(raw_path)
+            if samples is None or samples.size < 200:
+                return False
+            if style == "rogue":
+                processed = voicefx.rogue_voice(samples, rate)
+            else:
+                processed = voicefx.dying_transformer(samples, rate, intensity)
+            fd, out_path = tempfile.mkstemp(suffix=".wav", prefix="chatbot_fx_")
+            os.close(fd)
+            voicefx.write_wav(out_path, processed, rate)
+            winsound.PlaySound(out_path, winsound.SND_FILENAME)
+            return True
+        except ImportError as exc:
+            if not getattr(self, "_fx_warned", False):
+                self._fx_warned = True
+                print(f"[voice] voice effects unavailable ({exc}) -- using the plain voice. "
+                      "Run: pip install numpy")
+            return False
+        except Exception as exc:
+            print(f"[voice] voice effect failed ({exc}); using the plain voice for this line.")
+            return False
+        finally:
+            for p in (raw_path, out_path):
+                if p:
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
 
     @property
     def available(self) -> bool:
@@ -1051,31 +1104,42 @@ class Voice:
         names = {line.split()[0] for line in out.splitlines() if line.strip()}
         return next((v for v in PREFERRED_VOICES if v in names), None)
 
-    def _speak_say_cmd(self, text: str) -> None:
-        cmd = ["say", "-r", str(self.RATE_WPM)]
+    def _speak_say_cmd(self, text: str, style: str | None = None) -> None:
+        # macOS: the audio-effect pipeline is Windows-only, so the menacing
+        # styles use `say`'s own embedded speech commands instead -- lower
+        # base pitch (pbas) and a slower rate.
+        cmd = ["say", "-r", str(self.STYLE_RATE_WPM.get(style, self.RATE_WPM))]
         if self.say_voice:
             cmd += ["-v", self.say_voice]
+        if style == "rogue":
+            text = "[[pbas 12]] " + text
+        elif style == "dying":
+            text = "[[pbas 20]] " + text
         cmd.append(text)
         subprocess.run(cmd, timeout=self.SAY_TIMEOUT_S, check=False)
 
-    def _speak_pyttsx3(self, text: str) -> None:
+    def _speak_pyttsx3(self, text: str, style: str | None = None, intensity: float = 0.0) -> None:
         """Hands text to the dedicated TTS worker thread and blocks (with the
         usual safety-net timeout) until it's spoken — never touches the
         engine directly from this (caller's) thread."""
         done = threading.Event()
         result: dict = {}
-        self._tts_queue.put((text, done, result))
+        self._tts_queue.put((text, done, result, style, intensity))
         if not done.wait(self.SAY_TIMEOUT_S):
             print(f"[voice] TTS playback did not finish within {self.SAY_TIMEOUT_S}s; "
                   "skipping audio for this line.")
         elif "error" in result:
             raise result["error"]
 
-    def say(self, text: str) -> None:
+    def say(self, text: str, style: str | None = None, intensity: float = 0.0, show: bool = True) -> None:
+        """style: None (normal), "rogue" (scarier takeover voice) or "dying"
+        (a machine failing while code overwrites it; intensity 0..1 is how
+        far gone). show=False speaks without also adding the text to the
+        chatbot panel -- for lines the screen is already displaying."""
         segments = speech_segments(text)
         if not segments:
             return
-        if self.screen:
+        if self.screen and show:
             # sentence_lines(), not segments -- the screen breaks each
             # SENTENCE onto its own visual line, independent of segments'
             # paragraph-level grouping (which is only about where TTS
@@ -1101,9 +1165,10 @@ class Voice:
                 self.screen.set_speaking(True)
             try:
                 if self.mode == "pyttsx3":
-                    self._speak_pyttsx3(spoken)
+                    self._speak_pyttsx3(spoken, style, intensity)
                 else:
-                    ok, _ = run_with_timeout(lambda spoken=spoken: self._speak_say_cmd(spoken), self.SAY_TIMEOUT_S)
+                    ok, _ = run_with_timeout(
+                        lambda spoken=spoken: self._speak_say_cmd(spoken, style), self.SAY_TIMEOUT_S)
                     if not ok:
                         print(f"[voice] TTS playback did not finish within {self.SAY_TIMEOUT_S}s; "
                               "skipping audio for this line.")
@@ -1507,12 +1572,42 @@ def run_rogue_danger(danger: dict, voice: Voice, screen: ChatbotScreen) -> None:
             # another line appended to the same green log.
             screen.clear()
             screen.set_theme("red")
-            voice.say(item.get("body"))
+            voice.say(item.get("body"), style="rogue")  # deeper, slower, distorted -- see voicefx.rogue_voice
         elif i < len(items) - 1:
             time.sleep(0.3)
 
 
-def run_override(override: dict, hub: HubClient, override_keyword: str, screen: ChatbotScreen) -> None:
+def command_to_speech(cmd: str) -> str:
+    """Turns a code-looking command into something a TTS voice can read out:
+    'assert_control(engineer_id=01)' -> 'assert control, engineer I D zero 1'."""
+    s = re.sub(r"\(\s*\)", "", cmd.strip())          # empty () is just noise when spoken
+    s = s.replace("(", ", ").replace(")", "")
+    s = s.replace("=", " ").replace(".", ", ").replace("_", " ")
+    s = re.sub(r"\bid\b", "I D", s, flags=re.IGNORECASE)
+    s = re.sub(r"\b0(\d)\b", r"zero \1", s)
+    return re.sub(r"\s+", " ", s).strip(" ,")
+
+
+def speak_override_readout(voice: Voice, lines: list[dict]) -> None:
+    """Reads the commands being run aloud, in the failing-machine voice. The
+    corruption builds across the lines (intensity 0.35 -> 1.0), so it sounds
+    like the system being progressively overwritten rather than the same
+    effect repeated."""
+    spoken: list[str] = []
+    for entry in lines:
+        if "cmd" in entry:
+            spoken.append(command_to_speech(entry["cmd"]))
+        elif "out" in entry:
+            spoken.append(re.sub(r"^SYSTEM:\s*", "", str(entry["out"])))  # the screen already shows the prefix
+    spoken = [s for s in spoken if s]
+    for i, text in enumerate(spoken):
+        intensity = 0.35 + 0.65 * (i / max(1, len(spoken) - 1))
+        voice.say(text, style="dying", intensity=intensity, show=False)
+        time.sleep(0.12)
+
+
+def run_override(override: dict, hub: HubClient, override_keyword: str, screen: ChatbotScreen,
+                 voice: "Voice | None" = None) -> None:
     """The story has the student physically return to the terminal and type
     OVERRIDE — but that's typed input(), which blocks this whole thread, so
     it can't also poll anything else at the same time. A background thread
@@ -1580,6 +1675,10 @@ def run_override(override: dict, hub: HubClient, override_keyword: str, screen: 
         if item.get("type") == "terminal":
             print_terminal(item["lines"])
             seq = screen.show_terminal(item["lines"])  # audience sees the same commands, not just the operator
+            if voice is not None:
+                # The system reads the commands out loud as they type -- a
+                # failing machine being overwritten by code (voicefx.dying_transformer).
+                speak_override_readout(voice, item["lines"])
             screen.wait_for_typing_idle(seq)  # hold the flicker until the screen has actually finished typing them
             continue
         print(f"\n{item.get('icon', '')} {ANSI['bold']}{item['title']}{ANSI['reset']}")
@@ -1724,7 +1823,7 @@ def main() -> None:
         # that red screen (nothing further happens on its own) until the
         # student types OVERRIDE, which is what run_override waits for next.
         play_video_and_wait(screen, rogue_video_path, args.speed, "rogue-phase")
-        run_override(content["rogue"]["override"], hub, override_keyword, screen)
+        run_override(content["rogue"]["override"], hub, override_keyword, screen, voice)
         run_resolution(content["resolution"], voice, listener)
         run_close(content.get("credits"), content["close"])
         print(f"\n{ANSI['cyan']}{ANSI['bold']}END OF SHOW{ANSI['reset']}\n")
