@@ -34,8 +34,8 @@ void main() {
   vReveal = revealFor(aDissolveSeed, uFormAmount);
 
   vec3 displaced = position
-    + normal * (uJawAmount * aJawWeight * 0.16)
-    + vec3(0.0, -uJawAmount * aJawWeight * 0.12, 0.0);
+    + normal * (uJawAmount * aJawWeight * 0.03)
+    + vec3(0.0, -uJawAmount * aJawWeight * 0.22, 0.0);
 
   vec4 worldPos = modelMatrix * vec4(displaced, 1.0);
   vWorldPos = worldPos.xyz;
