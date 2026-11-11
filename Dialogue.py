@@ -683,8 +683,13 @@ class _ScreenHandler(http.server.BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
                     remaining -= len(chunk)
-        except (BrokenPipeError, ConnectionResetError):
-            pass  # browser navigated away / seeked — not an error
+        except ConnectionError:
+            # Browser dropped the stream (seek, playback-rate change, tab
+            # closed, video ended early). On Windows that surfaces as
+            # ConnectionAbortedError (WinError 10053) as well as the
+            # BrokenPipe/ConnectionReset cases -- all subclasses of
+            # ConnectionError, none of them a real problem.
+            pass
 
     def _serve_music(self) -> None:
         path = self.server.screen_ref._music_path
