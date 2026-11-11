@@ -679,7 +679,13 @@
       canvas.style.display = 'none';
       videoEl.style.display = 'block';
       if (!active) return; // inactive tab: stay silent and paused, see BroadcastChannel setup above
-      videoEl.playbackRate = window._videoSpeed || 1;
+      // Assigning .src runs the media load algorithm, which resets
+      // playbackRate to defaultPlaybackRate -- so set both, and apply the
+      // rate again once metadata is loaded, or --speed is silently ignored.
+      const rate = window._videoSpeed || 1;
+      videoEl.defaultPlaybackRate = rate;
+      videoEl.playbackRate = rate;
+      videoEl.addEventListener('loadedmetadata', () => { videoEl.playbackRate = rate; }, { once: true });
       videoEl.src = '/video?ts=' + Date.now();
       videoEl.currentTime = 0;
       videoEl.play().catch(() => {});
