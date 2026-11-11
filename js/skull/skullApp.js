@@ -33,7 +33,7 @@ export function initSkull({
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(30, width / height, 0.1, 20);
-  camera.position.set(0, 0.02, 4.6);
+  camera.position.set(0, 0.02, 6.4); // far enough that the whole head fits the 3:4 panel with margin
 
   const geometry = buildSolidSkullGeometry();
   const digitTex = buildDigitTexture();
@@ -49,7 +49,7 @@ export function initSkull({
       uJawAmount: { value: 0 },
       uMouthGlow: { value: 0 },
       uDigitTex: { value: digitTex },
-      uTexTiling: { value: 10.0 },
+      uTexTiling: { value: 2.5 }, // large enough that single 0/1 glyphs resolve on a ~340px panel
       uColor: { value: new THREE.Color(color) },
       uHotColor: { value: new THREE.Color(hotColor) },
       uDarkColor: { value: new THREE.Color(darkColor) },
@@ -65,7 +65,7 @@ export function initSkull({
 
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
-  const bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 0.55, 0.55, 0.16);
+  const bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 0.3, 0.4, 0.55); // strength, radius, threshold: only the brightest glyphs/rim bloom
   composer.addPass(bloomPass);
   composer.addPass(new OutputPass());
 

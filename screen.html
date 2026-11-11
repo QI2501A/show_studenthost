@@ -134,6 +134,18 @@
        top of that would blur the whole element uniformly again, right
        back to washing out the (now genuinely black) eye sockets. */
   }
+  /* The stock UnrealBloomPass writes alpha=1 across the whole target, so the
+     canvas is opaque even though the clear colour is transparent. "screen"
+     blending treats black as see-through and adds the glow on top of the
+     digital rain, so no rectangle shows behind the head. The blend must sit
+     on the container itself: its transform makes it a stacking context, so
+     a blend mode on the inner canvas would only see a transparent backdrop. */
+  #headContainer { mix-blend-mode: screen; }
+  #headContainer canvas {
+    display: block;
+    width: 100% !important;
+    height: 100% !important;
+  }
 
   #showVideo {
     display: none;
