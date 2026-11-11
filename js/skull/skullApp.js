@@ -21,6 +21,9 @@ export function initSkull({
   color = '#00ff41',
   hotColor = '#baffcb',
   darkColor = '#020402',
+  // alwaysOn: stay assembled instead of dissolving whenever the chatbot is
+  // silent (speaking then only drives the jaw). Used by the rogue-phase skulls.
+  alwaysOn = false,
 } = {}) {
   const width = container.clientWidth || 300;
   const height = container.clientHeight || 360;
@@ -84,14 +87,21 @@ export function initSkull({
     // Runs a self-contained assemble/hold/dissolve/pause demo timeline until
     // the first real setSpeaking() call arrives -- lets this whole pipeline
     // be verified visually with no audio/state wiring at all.
-    demo: true,
+    demo: !alwaysOn,
     demoT: 0,
   };
+  if (alwaysOn) state.targetForm = 1;
 
   function setSpeaking(isSpeaking) {
     state.demo = false;
     state.speaking = isSpeaking;
-    state.targetForm = isSpeaking ? 1 : 0;
+    state.targetForm = (isSpeaking || alwaysOn) ? 1 : 0;
+  }
+
+  // Restart the assemble sweep from nothing -- called when the skull is
+  // about to be shown so the audience sees it materialise.
+  function replay() {
+    state.formAmount = 0;
   }
 
   function setTheme(hex) {
@@ -124,6 +134,9 @@ export function initSkull({
     requestAnimationFrame(animate);
     const dt = clock.getDelta();
     const t = clock.elapsedTime;
+    // Hidden (display: none): nothing to draw, so don't burn the GPU on it --
+    // matters now that there are three skulls on the page.
+    if (!container.getClientRects().length) return;
 
     if (state.demo) {
       state.demoT += dt;
@@ -175,5 +188,5 @@ export function initSkull({
     if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
   }
 
-  return { setSpeaking, setTheme, dispose, renderer, scene, camera };
+  return { setSpeaking, setTheme, replay, dispose, renderer, scene, camera };
 }

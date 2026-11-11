@@ -43,7 +43,8 @@
     position: fixed;
     top: 50%;
     transform: translateY(-50%);
-    max-height: 78vh;
+    max-height: 84vh;
+    z-index: 3; /* above the skulls, whose edges may tuck a little behind the panels */
     background: rgba(0, 0, 0, 0.6);
     border: 1px solid var(--border);
     box-shadow: 0 0 60px var(--panel-glow) inset;
@@ -83,16 +84,21 @@
     color: var(--fg);
     text-shadow: 0 0 6px var(--fg-glow);
     white-space: pre-wrap;
+    /* The log still scrolls to the newest line, but with no visible
+       scrollbar -- it looked unsightly on the big screen. */
+    scrollbar-width: none;
+    -ms-overflow-style: none;
   }
+  .term-body::-webkit-scrollbar { display: none; }
 
   /* Centre: the chatbot's own answers — the main event. */
-  /* Sits left of centre (44%) so the now-larger skull has room on the right. */
+  /* Dead centre of the screen, and wider than before so lines wrap less. */
   #panel {
-    left: 44%;
+    left: 50%;
     transform: translate(-50%, -50%);
-    width: 34vw;
+    width: 38vw;
     min-width: 300px;
-    max-width: 680px;
+    max-width: 780px;
   }
   /* Text is 1.5x the original size (was clamp(15px, 1.5vw, 24px)). */
   #panel .term-body { font-size: clamp(22px, 2.25vw, 36px); }
@@ -107,10 +113,10 @@
 
   /* Left: what the mic hears the student say -- a secondary log, smaller. */
   #heardPanel {
-    left: 2%;
-    width: 21vw;
+    left: 5.5%;
+    width: 20vw;
     min-width: 240px;
-    max-width: 420px;
+    max-width: 400px;
     opacity: 0.85;
   }
   /* Text is 1.5x the original size (was clamp(12px, 1.05vw, 17px)). */
@@ -120,14 +126,16 @@
      in a separate session (js/skull/skullApp.js), mounted into this
      container below. Its own <canvas> fills this box; initSkull() reads
      clientWidth/clientHeight from it, so the size/position live here. */
-  /* About 2x the original (340x453 on a 1920-wide screen -> 690x920): sized by
-     height so it never outgrows a short screen, width follows the 3:4 ratio. */
+  /* Large (630x840 on a 1920x1080 screen, ~1.85x the original 340x453): sized
+     by height so it never outgrows a short screen, width follows the 3:4
+     ratio. A little smaller than the 2x it was, to leave room for the wider,
+     centred terminal now that the head also sits further in from the edge. */
   #headContainer {
     position: fixed;
-    right: 1.5%;
+    right: 3.5%;
     top: 50%;
     transform: translateY(-50%);
-    height: min(88vh, 920px);
+    height: min(80vh, 840px);
     aspect-ratio: 3 / 4;
     box-sizing: border-box;
     overflow: hidden;
@@ -144,11 +152,32 @@
      on the container itself: its transform makes it a stacking context, so
      a blend mode on the inner canvas would only see a transparent backdrop. */
   #headContainer { mix-blend-mode: screen; }
-  #headContainer canvas {
+  #headContainer canvas, .rogueSkull canvas {
     display: block;
     width: 100% !important;
     height: 100% !important;
   }
+
+  /* The rogue phase swaps the layout: the mic panel and the green skull hide,
+     and two red skulls flank the centred terminal (same size as the main
+     skull, tucked into the gap on each side). Everything returns to normal
+     once control is restored (green). */
+  .rogueSkull {
+    display: none;
+    position: fixed;
+    top: 50%;
+    transform: translateY(-50%);
+    height: min(80vh, 840px);
+    aspect-ratio: 3 / 4;
+    overflow: hidden;
+    mix-blend-mode: screen;
+    z-index: 1;
+  }
+  #rogueSkullL { left: 0; }
+  #rogueSkullR { right: 0; }
+  body.rogue-mode #heardPanel,
+  body.rogue-mode #headContainer { display: none; }
+  body.rogue-mode .rogueSkull { display: block; }
 
   #showVideo {
     display: none;
@@ -280,6 +309,9 @@
   </div>
 
   <div id="headContainer"></div>
+  <!-- Rogue phase only: two red skulls flanking the centred terminal. -->
+  <div id="rogueSkullL" class="rogueSkull"></div>
+  <div id="rogueSkullR" class="rogueSkull"></div>
 
   <video id="showVideo" playsinline></video>
   <audio id="rogueMusic" loop preload="none"></audio>
@@ -412,6 +444,7 @@
     const heardOutputEl = document.getElementById('heardOutput');
     const heardBodyEl = document.getElementById('heardBody');
     const headContainerEl = document.getElementById('headContainer');
+    const rogueSkullEls = Array.from(document.querySelectorAll('.rogueSkull'));
     const videoEl = document.getElementById('showVideo');
     const PARAGRAPH_PAUSE_MS = 1100; // matches Voice.PARAGRAPH_PAUSE_S in Dialogue.py
     const MIN_CHAR_MS = 18;   // never type faster than this, even for a very long line
@@ -915,6 +948,9 @@
       document.body.dataset.theme = theme;
       rainColor = THEME_RAIN_COLORS[theme] || THEME_RAIN_COLORS.green;
       if (window.__skullHead) window.__skullHead.setTheme(rainColor);
+      // The two rogue-phase skulls follow the screen colour too, so they
+      // flicker red/green with everything else while control is regained.
+      (window.__rogueSkulls || []).forEach((s) => s.setTheme(rainColor));
     }
 
     let flickerTimer = null;
@@ -955,6 +991,9 @@
       }
       setSteadyThemeColor(theme);
       if (theme === 'red') {
+        // Rogue layout: mic panel + green skull out, two red skulls flank the terminal.
+        document.body.classList.add('rogue-mode');
+        (window.__rogueSkulls || []).forEach((s) => s.replay()); // they assemble in as the takeover starts
         startMenacingMusic();
         startRogueSirens();
         overrideCommandEl.classList.add('active');
@@ -963,6 +1002,7 @@
         stopMenacingMusic();
         stopRogueSirens();
         stopDyingSirens(true); // green = control restored: one last power-down, then silence
+        document.body.classList.remove('rogue-mode'); // mic panel + green skull come back
         overrideCommandEl.classList.remove('active');
         overrideInputEl.value = '';
         overrideInputEl.blur();
@@ -1080,6 +1120,7 @@
       panelEl.style.display = 'none';
       heardPanelEl.style.display = 'none';
       headContainerEl.style.display = 'none';
+      rogueSkullEls.forEach((el) => { el.style.display = 'none'; });
       canvas.style.display = 'none';
       videoEl.style.display = 'block';
       if (!active) return; // inactive tab: stay silent and paused, see BroadcastChannel setup above
@@ -1104,6 +1145,7 @@
       panelEl.style.display = '';
       heardPanelEl.style.display = '';
       headContainerEl.style.display = '';
+      rogueSkullEls.forEach((el) => { el.style.display = ''; }); // back to whatever the rogue-mode CSS says
       canvas.style.display = '';
     }
 
@@ -1119,6 +1161,7 @@
         if (typeof data.rate_wpm === 'number' && data.rate_wpm > 0) rateWpm = data.rate_wpm;
         if (typeof data.has_music_file === 'boolean') hasMusicFile = data.has_music_file;
         if (typeof data.speaking === 'boolean' && window.__skullHead) window.__skullHead.setSpeaking(data.speaking);
+        if (typeof data.speaking === 'boolean') (window.__rogueSkulls || []).forEach((s) => s.setSpeaking(data.speaking));
         setSirenDuck(data.speaking === true, data.mode === 'video'); // keep the voice/video audible over the sirens
         if (data.theme) applyTheme(data.theme);
 
@@ -1185,6 +1228,18 @@
     } catch (e) {
       console.warn('[head] Three.js skull unavailable:', e);
       window.__skullHead = null;
+    }
+    try {
+      // Two more, always red and always assembled, for the rogue phase (the
+      // CSS keeps them hidden, and skullApp skips rendering while hidden).
+      window.__rogueSkulls = ['rogueSkullL', 'rogueSkullR'].map((id) => initSkull({
+        container: document.getElementById(id),
+        color: '#ff2a1f', hotColor: '#ff6a5c', darkColor: '#050101',
+        alwaysOn: true,
+      }));
+    } catch (e) {
+      console.warn('[head] rogue skulls unavailable:', e);
+      window.__rogueSkulls = [];
     }
   </script>
 </body>
