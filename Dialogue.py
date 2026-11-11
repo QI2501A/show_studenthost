@@ -1131,7 +1131,7 @@ def _prompt_enter(prompt: str) -> None:
 
 
 class VoiceListener:
-    INIT_TIMEOUT_S = 8
+    INIT_TIMEOUT_S = 20  # room for retries across several input devices
     LISTEN_MARGIN_S = 15  # safety margin added on top of each listen()'s own timeout/phrase_time_limit
 
     def __init__(self, screen: "ChatbotScreen | None" = None) -> None:
@@ -1159,11 +1159,29 @@ class VoiceListener:
     def _build_mic():
         import speech_recognition as sr
 
-        recognizer = sr.Recognizer()
-        mic = sr.Microphone()
-        with mic as source:
-            recognizer.adjust_for_ambient_noise(source, duration=0.5)
-        return recognizer, mic
+        # PortAudio can fail transiently on Windows (e.g. "[Errno -9988]
+        # Stream closed" while a USB mic is still being claimed/released), so
+        # retry the default device, then fall back to the other input devices.
+        candidates: list = [None, None]
+        try:
+            for idx, name in enumerate(sr.Microphone.list_microphone_names()):
+                candidates.append(idx)
+        except Exception:
+            pass
+        last_exc: Exception | None = None
+        for idx in candidates:
+            try:
+                recognizer = sr.Recognizer()
+                mic = sr.Microphone(device_index=idx)
+                with mic as source:
+                    recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                if idx is not None:
+                    print(f"[voice] using microphone device #{idx}")
+                return recognizer, mic
+            except Exception as exc:
+                last_exc = exc
+                time.sleep(0.5)
+        raise last_exc if last_exc else RuntimeError("no microphone found")
 
     @property
     def available(self) -> bool:
