@@ -4,16 +4,21 @@ import { makeNoise3D } from './noise3d.js';
 // PLACEHOLDER GEOMETRY (no CC0 skull asset is vendored here): a sphere
 // sculpted with deliberately exaggerated skull landmarks -- deep eye
 // sockets, a hollow nasal cavity, cheekbone flare, temple taper, and a
-// narrow jaw. Unlike the earlier point-cloud version, this is rendered as a
-// SOLID mesh (see skullShader.js/skullApp.js) -- the eye sockets read as
-// genuinely black because the fragment shader masks emission to zero there
-// (see aCavityMask below), not because fewer particles happen to land in
-// that area. Swap in a real glTF skull later by replacing this function's
-// return value with a loaded geometry of your own (keep the aCavityMask /
+// mandible shaped against a real front-view skull reference photo. Unlike
+// the earlier point-cloud version, this is rendered as a SOLID mesh (see
+// skullShader.js/skullApp.js) -- the eye sockets read as genuinely black
+// because the fragment shader masks emission to zero there (see
+// aCavityMask below), not because fewer particles happen to land in that
+// area. Swap in a real glTF skull later by replacing this function's return
+// value with a loaded geometry of your own (keep the aCavityMask /
 // aJawWeight / aDissolveSeed attributes, or the shader needs matching edits).
 function smoothstep(edge0, edge1, x) {
   const t = THREE.MathUtils.clamp((x - edge0) / (edge1 - edge0), 0, 1);
   return t * t * (3 - 2 * t);
+}
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
 }
 
 function gauss(dir, center, sharpness) {
@@ -38,8 +43,6 @@ export function buildSolidSkullGeometry({ widthSegments = 160, heightSegments = 
   const templeR = new THREE.Vector3(0.80, 0.20, 0.30).normalize();
   const jawFront = new THREE.Vector3(0, -0.92, 0.60).normalize();
   const chinTip = new THREE.Vector3(0, -1.0, 0.55).normalize();
-  const gonialL = new THREE.Vector3(-0.62, -0.62, 0.20).normalize();
-  const gonialR = new THREE.Vector3(0.62, -0.62, 0.20).normalize();
   const hollowL = new THREE.Vector3(-0.52, -0.46, 0.72).normalize();
   const hollowR = new THREE.Vector3(0.52, -0.46, 0.72).normalize();
 
@@ -53,7 +56,8 @@ export function buildSolidSkullGeometry({ widthSegments = 160, heightSegments = 
     dir.copy(orig).normalize();
     const y = orig.y;
 
-    const jawZone = smoothstep(-0.05, 0.85, -y);
+    // jawT: 0 at/above the cheekbone line, 1 by the chin tip.
+    const jawT = smoothstep(-0.05, 0.85, -y);
     const craniumZone = smoothstep(0.10, 0.95, y);
 
     let r = 1.0;
@@ -63,13 +67,11 @@ export function buildSolidSkullGeometry({ widthSegments = 160, heightSegments = 
     r += 0.18 * gauss(dir, cheekL, 8);
     r += 0.18 * gauss(dir, cheekR, 8);
     r += 0.08 * gauss(dir, browCenter, 15);
-    r -= jawZone * 0.30;
-    r += 0.12 * gauss(dir, jawFront, 9) * jawZone;
-    // Jaw corners (gonial angle) and a squarer chin give the lower face a
-    // defined mandible instead of a tapering nub.
-    r += 0.12 * gauss(dir, gonialL, 10) * jawZone;
-    r += 0.12 * gauss(dir, gonialR, 10) * jawZone;
-    r += 0.05 * gauss(dir, chinTip, 14) * jawZone;
+    // Subtle chin/jaw-front mass -- the overall mandible SHAPE (width
+    // profile, not a simple radial bump) is handled below, after `out` is
+    // computed; these are just small local bulges on top of it.
+    r += 0.05 * gauss(dir, jawFront, 9) * jawT;
+    r += 0.04 * gauss(dir, chinTip, 14) * jawT;
     // Hollow cheeks under the cheekbones.
     r -= 0.07 * gauss(dir, hollowL, 14);
     r -= 0.07 * gauss(dir, hollowR, 14);
@@ -85,9 +87,36 @@ export function buildSolidSkullGeometry({ widthSegments = 160, heightSegments = 
     r = Math.max(r, 0.26);
 
     out.copy(dir).multiplyScalar(r);
-    out.z += jawZone * 0.14;
-    out.x *= 1 - jawZone * 0.22;
-    out.y *= 1.08 + jawZone * 0.30; // longer lower face so the mouth/jaw have room
+
+    // --- Mandible width profile -----------------------------------------
+    // A real jaw does not taper to a point: the gonial angle (the back
+    // corner of the jaw, up near the ears) is close to cheekbone width,
+    // the jawline curves in only moderately from there, and the chin is a
+    // rounded, blunt mass. widthMul flares OUT a little past the
+    // cheekbone line before narrowing toward the chin, instead of
+    // shrinking monotonically the whole way down (the old behaviour,
+    // which produced the "icicle" taper).
+    const widthMul = jawT < 0.42
+      ? lerp(1.0, 1.08, smoothstep(0, 0.42, jawT))
+      : lerp(1.08, 0.56, smoothstep(0.42, 1.0, jawT));
+    out.x *= widthMul;
+    out.z *= widthMul;
+    out.z += jawT * 0.12; // chin projects forward slightly, as in the reference photo
+    out.y *= 1.0 + jawT * 0.16; // modest extra length for mouth/jaw-drop room (not the old 1.38x)
+
+    // A UV sphere's own vertices pinch to near-zero x/z at the pole purely
+    // from the latitude/longitude parameterization -- no radial scale
+    // above can fix that, since scaling an already-tiny vector keeps it
+    // tiny. Explicitly floor the horizontal (xz) radius near the very
+    // bottom so the chin ends in a rounded, slightly flattened underside
+    // instead of collapsing to a point.
+    const minRing = 0.24 * smoothstep(0.75, 1.0, jawT);
+    const ring = Math.hypot(out.x, out.z);
+    if (ring < minRing && ring > 1e-6) {
+      const scale = minRing / ring;
+      out.x *= scale;
+      out.z *= scale;
+    }
 
     pos.setXYZ(i, out.x, out.y, out.z);
 
@@ -104,14 +133,16 @@ export function buildSolidSkullGeometry({ widthSegments = 160, heightSegments = 
     const noseMask = smoothstep(0.32, 0.58, noseMaskDepth);
     // Thin dark mouth slot across the front of the face, between the upper
     // and lower teeth line -- reads as an opening when the jaw drops.
-    const slot = Math.exp(-((out.y + 0.44) * (out.y + 0.44)) * 900)
-      * smoothstep(0.34, 0.18, Math.abs(out.x))
+    const slot = Math.exp(-((out.y + 0.37) * (out.y + 0.37)) * 900)
+      * smoothstep(0.36, 0.20, Math.abs(out.x))
       * smoothstep(0.15, 0.40, out.z);
     cavityMask[i] = Math.min(1.0 - Math.max(socketMaskL, socketMaskR, noseMask), 1.0 - slot * 0.95);
 
     // Jaw weight: the whole mandible (everything below the mouth line)
     // hinges down together, ramping 0 -> 1 from the mouth to the chin.
-    jawWeight[i] = smoothstep(-0.44, -0.80, out.y);
+    // (Thresholds rescaled from the old -0.44/-0.80 to match the jaw's
+    // shorter y-span now that it no longer over-stretches toward a point.)
+    jawWeight[i] = smoothstep(-0.37, -0.67, out.y);
 
     // Dissolve seed: blob-scale noise (not per-vertex random) so nearby
     // vertices lock in together as uFormAmount rises -- an organic sweep
