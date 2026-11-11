@@ -524,7 +524,7 @@
     let sirenCtx = null;
     let sirenNodes = null;
     let sirenDuck = 1;
-    const SIREN_LEVEL = 0.3; // overall loudness ceiling (before ducking)
+    const SIREN_LEVEL = 0.26; // overall loudness ceiling (before ducking); overlapping hits spike well above the average
 
     function setSirenDuck(shouldDuck) { sirenDuck = shouldDuck ? 0.4 : 1; }
 
@@ -567,7 +567,7 @@
 
         // Bed 1 & 2: wailing sirens, each pitch-swept by its own LFO.
         const wails = [];
-        [[850, 380, 0.4, -0.5, 0.5], [610, 260, 0.63, 0.5, 0.32]].forEach(([base, depth, rate, panV, gain]) => {
+        [[850, 380, 0.4, -0.5, 0.5], [610, 260, 0.63, 0.5, 0.32], [1300, 420, 1.1, 0, 0.2]].forEach(([base, depth, rate, panV, gain]) => {
           const osc = ctx.createOscillator(); osc.type = 'sawtooth'; osc.frequency.value = base;
           const lfo = ctx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = rate;
           const lfoGain = ctx.createGain(); lfoGain.gain.value = depth;
@@ -638,41 +638,89 @@
             setTimeout(() => { if (sirenCtx === ctx) beep(f * (1 + (k % 3) * 0.5), 0.022, 'sawtooth', 0.4, panV); }, k * 38);
           }
         }
+        // Glitchy machine blips: a rapid random run of short notes.
+        function arpeggio(panV) {
+          const scale = [330, 440, 523, 660, 880, 1047, 1320, 1760];
+          const n = 6 + Math.floor(Math.random() * 6);
+          for (let k = 0; k < n; k++) {
+            const f = scale[Math.floor(Math.random() * scale.length)];
+            setTimeout(() => { if (sirenCtx === ctx) beep(f, 0.035, 'square', 0.3, panV); }, k * 48);
+          }
+        }
+        // Low impact: a thump that falls away.
+        function boom(panV) { sweep(rand(110, 180), rand(30, 45), rand(0.35, 0.7), 'sine', 0.95, panV); }
+        // Harsh klaxon buzz: two short low sawtooth blasts.
+        function klaxon(panV) {
+          const f = rand(110, 190);
+          beep(f, 0.22, 'sawtooth', 0.42, panV);
+          setTimeout(() => { if (sirenCtx === ctx) beep(f * 1.19, 0.28, 'sawtooth', 0.42, panV); }, 270);
+        }
+        // Fast-vibrato warble.
+        function warble(panV) {
+          const t = ctx.currentTime, dur = rand(0.35, 0.8);
+          const o = ctx.createOscillator(); o.type = 'square'; o.frequency.value = rand(500, 1600);
+          const l = ctx.createOscillator(); l.frequency.value = rand(12, 26);
+          const lg = ctx.createGain(); lg.gain.value = rand(120, 380);
+          l.connect(lg); lg.connect(o.frequency);
+          const g = ctx.createGain();
+          g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.3, t + 0.03);
+          g.gain.setValueAtTime(0.3, t + dur - 0.05); g.gain.linearRampToValueAtTime(0.0001, t + dur);
+          o.connect(g); route(g, panV);
+          o.start(t); l.start(t); o.stop(t + dur + 0.02); l.stop(t + dur + 0.02);
+        }
+        // Pitch hiccup: knock the wailing sirens off-pitch for a moment.
+        function pitchJump() {
+          const t = ctx.currentTime;
+          wails.forEach((w) => {
+            w.osc.detune.cancelScheduledValues(t);
+            w.osc.detune.setValueAtTime(rand(-1500, 1500), t);
+            w.osc.detune.setValueAtTime(0, t + rand(0.08, 0.3));
+          });
+        }
+        // Sudden dropout: everything cuts out for an instant, then slams back.
+        let dropUntil = 0;
+        function dropout() { dropUntil = ctx.currentTime + rand(0.06, 0.22); }
+
         const oneShots = [
           (p) => beep(rand(400, 2400), rand(0.06, 0.25), Math.random() < 0.5 ? 'square' : 'sawtooth', 0.34, p),
           (p) => sweep(rand(1800, 3200), rand(70, 140), rand(0.3, 0.9), 'sawtooth', 0.4, p),   // pitch dive
           (p) => sweep(rand(200, 330), rand(1300, 1900), rand(0.5, 1.0), 'sawtooth', 0.36, p), // rising whoop
-          alarmTrain,
+          alarmTrain, alarmTrain,
           (p) => noiseBurst(rand(0.08, 0.4), 0.7, p),
-          stutter,
+          (p) => noiseBurst(rand(0.03, 0.12), 0.9, p),
+          stutter, arpeggio, boom, klaxon, warble,
+          pitchJump, pitchJump, dropout,
         ];
 
-        // Re-randomise the wail speeds every few seconds so they never settle
-        // into a predictable loop.
+        // Re-randomise the wail speeds every second or so, over a wide range,
+        // so they never settle into a predictable loop.
         const wailTimer = setInterval(() => {
           const t = ctx.currentTime;
           wails.forEach((w) => {
-            w.lfo.frequency.setTargetAtTime(rand(0.25, 1.4), t, 0.6);
-            w.lfoGain.gain.setTargetAtTime(rand(180, 520), t, 0.6);
+            w.lfo.frequency.setTargetAtTime(rand(0.2, 3.0), t, 0.25);
+            w.lfoGain.gain.setTargetAtTime(rand(150, 650), t, 0.25);
           });
-        }, 2600);
+        }, 1300);
 
         // The chaos scheduler: busier and louder the longer it has been going.
         const tick = setInterval(() => {
           if (sirenCtx !== ctx) return;
           const t = ctx.currentTime;
-          const intensity = Math.min(1, (t - startedAt) / 10);
-          master.gain.setTargetAtTime(SIREN_LEVEL * sirenDuck * (0.65 + 0.35 * intensity), t, 0.08);
+          const intensity = Math.min(1, (t - startedAt) / 6);
+          const level = SIREN_LEVEL * sirenDuck * (0.7 + 0.3 * intensity);
+          master.gain.setTargetAtTime(t < dropUntil ? level * 0.04 : level, t, t < dropUntil ? 0.01 : 0.03);
           while (twoToneNext < t + 0.6) {
             twoTone.frequency.setValueAtTime(twoToneHigh ? 960 : 770, twoToneNext);
             twoToneHigh = !twoToneHigh;
-            twoToneNext += 0.42;
+            twoToneNext += rand(0.16, 0.48); // irregular, not a metronome
           }
-          const hits = Math.random() < 0.15 + 0.45 * intensity ? 1 + (Math.random() < 0.4 * intensity ? 1 : 0) : 0;
+          let hits = Math.random() < 0.4 + 0.5 * intensity ? 1 : 0;
+          if (Math.random() < 0.55 * intensity) hits++;
+          if (Math.random() < 0.25 * intensity) hits++;
           for (let h = 0; h < hits; h++) {
             oneShots[Math.floor(Math.random() * oneShots.length)](rand(-0.9, 0.9));
           }
-        }, 90);
+        }, 55);
 
         master.gain.setValueAtTime(0, ctx.currentTime);
         master.gain.linearRampToValueAtTime(SIREN_LEVEL * 0.65, ctx.currentTime + 0.35); // punches in almost at once
