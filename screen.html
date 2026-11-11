@@ -57,17 +57,17 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    padding: 9px 14px;
+    padding: 13px 20px;
     border-bottom: 1px solid var(--border);
     font-family: Menlo, Consolas, "Courier New", monospace;
-    font-size: 12px;
+    font-size: 18px; /* 1.5x the original 12px, like the panel text below */
     letter-spacing: 0.5px;
     color: var(--fg);
     opacity: 0.7;
   }
   .term-dot {
-    width: 9px;
-    height: 9px;
+    width: 13px;
+    height: 13px;
     border-radius: 50%;
     background: var(--fg);
     opacity: 0.5;
@@ -86,14 +86,16 @@
   }
 
   /* Centre: the chatbot's own answers — the main event. */
+  /* Sits left of centre (44%) so the now-larger skull has room on the right. */
   #panel {
-    left: 50%;
+    left: 44%;
     transform: translate(-50%, -50%);
     width: 34vw;
     min-width: 300px;
-    max-width: 620px;
+    max-width: 680px;
   }
-  #panel .term-body { font-size: clamp(15px, 1.5vw, 24px); }
+  /* Text is 1.5x the original size (was clamp(15px, 1.5vw, 24px)). */
+  #panel .term-body { font-size: clamp(22px, 2.25vw, 36px); }
   #cursor {
     display: inline-block;
     width: 0.55em;
@@ -105,26 +107,27 @@
 
   /* Left: what the mic hears the student say -- a secondary log, smaller. */
   #heardPanel {
-    left: 3%;
-    width: 24vw;
+    left: 2%;
+    width: 21vw;
     min-width: 240px;
     max-width: 420px;
     opacity: 0.85;
   }
-  #heardPanel .term-body { font-size: clamp(12px, 1.05vw, 17px); opacity: 0.9; }
+  /* Text is 1.5x the original size (was clamp(12px, 1.05vw, 17px)). */
+  #heardPanel .term-body { font-size: clamp(18px, 1.575vw, 25.5px); opacity: 0.9; }
 
   /* Right third: the humanoid head -- a Three.js digital-rain skull built
      in a separate session (js/skull/skullApp.js), mounted into this
      container below. Its own <canvas> fills this box; initSkull() reads
      clientWidth/clientHeight from it, so the size/position live here. */
+  /* About 2x the original (340x453 on a 1920-wide screen -> 690x920): sized by
+     height so it never outgrows a short screen, width follows the 3:4 ratio. */
   #headContainer {
     position: fixed;
-    right: 5%;
+    right: 1.5%;
     top: 50%;
     transform: translateY(-50%);
-    width: 24vw;
-    max-width: 340px;
-    min-width: 160px;
+    height: min(88vh, 920px);
     aspect-ratio: 3 / 4;
     box-sizing: border-box;
     overflow: hidden;
@@ -523,47 +526,114 @@
     // a video plays (see setSirenDuck) so the voice and video stay audible.
     let sirenCtx = null;
     let sirenNodes = null;
-    let sirenDuck = 1;
     const SIREN_LEVEL = 0.26; // overall loudness ceiling (before ducking); overlapping hits spike well above the average
 
-    function setSirenDuck(shouldDuck) { sirenDuck = shouldDuck ? 0.4 : 1; }
+    // The voice has to win. The chatbot's speech is played by Dialogue.py
+    // through the same speakers, so the sirens can only get out of its way:
+    // while it speaks they drop to ~12% (about -18 dB), and they stay down for
+    // a beat after each sentence so they don't swell back between words. A
+    // video's own soundtrack gets a gentler duck.
+    const SIREN_DUCK_SPEECH = 0.12;
+    const SIREN_DUCK_VIDEO = 0.3;
+    let sirenDuckUntil = 0;
+    let sirenVideoDuck = false;
+    function setSirenDuck(speaking, video) {
+      if (speaking) sirenDuckUntil = performance.now() + 900;
+      sirenVideoDuck = !!video;
+    }
+    function currentSirenDuck() {
+      if (performance.now() < sirenDuckUntil) return SIREN_DUCK_SPEECH;
+      return sirenVideoDuck ? SIREN_DUCK_VIDEO : 1;
+    }
+
+    // Builds one siren audio chain (master gain -> soft-clip distortion ->
+    // compressor -> speakers) plus the one-shot sound makers both the
+    // takeover sirens and the dying sirens use.
+    function makeSirenChain() {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+
+      const master = ctx.createGain();
+      master.gain.value = 0;
+      const shaper = ctx.createWaveShaper();
+      const curve = new Float32Array(2048);
+      for (let i = 0; i < curve.length; i++) {
+        const x = (i / (curve.length - 1)) * 2 - 1;
+        curve[i] = (1 + 6) * x / (1 + 6 * Math.abs(x)); // soft-clip: harsher, not louder
+      }
+      shaper.curve = curve;
+      const comp = ctx.createDynamicsCompressor();
+      // `out` is the LAST stage, after the distortion and compressor, and is
+      // what the voice-ducking drives. Ducking `master` instead (before the
+      // soft-clipper) barely works: the clipper has high gain on quiet signals
+      // and hands most of the lost level straight back.
+      const out = ctx.createGain();
+      out.gain.value = 1;
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      master.connect(shaper); shaper.connect(comp); comp.connect(out);
+      out.connect(ctx.destination); out.connect(analyser);
+
+      const route = (node, panValue) => {
+        if (ctx.createStereoPanner) {
+          const p = ctx.createStereoPanner(); p.pan.value = panValue;
+          node.connect(p); p.connect(master);
+        } else {
+          node.connect(master);
+        }
+      };
+      const rand = (lo, hi) => lo + Math.random() * (hi - lo);
+
+      // Shared white-noise buffer for the static bursts.
+      const noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+      const nd = noiseBuf.getChannelData(0);
+      for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+
+      function beep(freq, dur, type, gain, panV) {
+        const t = ctx.currentTime;
+        const o = ctx.createOscillator(); o.type = type; o.frequency.value = freq;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.linearRampToValueAtTime(gain, t + 0.008);
+        g.gain.setValueAtTime(gain, t + Math.max(0.01, dur - 0.02));
+        g.gain.linearRampToValueAtTime(0.0001, t + dur);
+        o.connect(g); route(g, panV);
+        o.start(t); o.stop(t + dur + 0.02);
+      }
+      function sweep(f0, f1, dur, type, gain, panV) {
+        const t = ctx.currentTime;
+        const o = ctx.createOscillator(); o.type = type;
+        o.frequency.setValueAtTime(f0, t);
+        o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.linearRampToValueAtTime(gain, t + 0.04);
+        g.gain.linearRampToValueAtTime(0.0001, t + dur);
+        o.connect(g); route(g, panV);
+        o.start(t); o.stop(t + dur + 0.02);
+      }
+      function noiseBurst(dur, gain, panV) {
+        const t = ctx.currentTime;
+        const src = ctx.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+        const bp = ctx.createBiquadFilter(); bp.type = 'bandpass';
+        bp.frequency.setValueAtTime(rand(400, 5000), t);
+        bp.frequency.exponentialRampToValueAtTime(rand(300, 6000), t + dur);
+        bp.Q.value = rand(1, 8);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(gain, t);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        src.connect(bp); bp.connect(g); route(g, panV);
+        src.start(t, rand(0, 0.5)); src.stop(t + dur + 0.02);
+      }
+      return { ctx, master, out, analyser, route, rand, beep, sweep, noiseBurst };
+    }
 
     function startRogueSirens() {
       if (sirenCtx) return;
       try {
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const { ctx, master, out, analyser, route, rand, beep, sweep, noiseBurst } = makeSirenChain();
         sirenCtx = ctx;
-        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
         const startedAt = ctx.currentTime;
-
-        const master = ctx.createGain();
-        master.gain.value = 0;
-        const shaper = ctx.createWaveShaper();
-        const curve = new Float32Array(2048);
-        for (let i = 0; i < curve.length; i++) {
-          const x = (i / (curve.length - 1)) * 2 - 1;
-          curve[i] = (1 + 6) * x / (1 + 6 * Math.abs(x)); // soft-clip: harsher, not louder
-        }
-        shaper.curve = curve;
-        const comp = ctx.createDynamicsCompressor();
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 256;
-        master.connect(shaper); shaper.connect(comp); comp.connect(ctx.destination); comp.connect(analyser);
-
-        const pan = (value) => {
-          if (!ctx.createStereoPanner) return null;
-          const p = ctx.createStereoPanner(); p.pan.value = value; return p;
-        };
-        const route = (node, panValue) => {
-          const p = pan(panValue);
-          if (p) { node.connect(p); p.connect(master); } else { node.connect(master); }
-        };
-        const rand = (lo, hi) => lo + Math.random() * (hi - lo);
-
-        // Shared white-noise buffer for the static bursts.
-        const noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
-        const nd = noiseBuf.getChannelData(0);
-        for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
 
         // Bed 1 & 2: wailing sirens, each pitch-swept by its own LFO.
         const wails = [];
@@ -586,43 +656,7 @@
         let twoToneNext = ctx.currentTime;
         let twoToneHigh = true;
 
-        // One-shot sound makers -----------------------------------------------
-        function beep(freq, dur, type, gain, panV) {
-          const t = ctx.currentTime;
-          const o = ctx.createOscillator(); o.type = type; o.frequency.value = freq;
-          const g = ctx.createGain();
-          g.gain.setValueAtTime(0.0001, t);
-          g.gain.linearRampToValueAtTime(gain, t + 0.008);
-          g.gain.setValueAtTime(gain, t + Math.max(0.01, dur - 0.02));
-          g.gain.linearRampToValueAtTime(0.0001, t + dur);
-          o.connect(g); route(g, panV);
-          o.start(t); o.stop(t + dur + 0.02);
-        }
-        function sweep(f0, f1, dur, type, gain, panV) {
-          const t = ctx.currentTime;
-          const o = ctx.createOscillator(); o.type = type;
-          o.frequency.setValueAtTime(f0, t);
-          o.frequency.exponentialRampToValueAtTime(f1, t + dur);
-          const g = ctx.createGain();
-          g.gain.setValueAtTime(0.0001, t);
-          g.gain.linearRampToValueAtTime(gain, t + 0.04);
-          g.gain.linearRampToValueAtTime(0.0001, t + dur);
-          o.connect(g); route(g, panV);
-          o.start(t); o.stop(t + dur + 0.02);
-        }
-        function noiseBurst(dur, gain, panV) {
-          const t = ctx.currentTime;
-          const src = ctx.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
-          const bp = ctx.createBiquadFilter(); bp.type = 'bandpass';
-          bp.frequency.setValueAtTime(rand(400, 5000), t);
-          bp.frequency.exponentialRampToValueAtTime(rand(300, 6000), t + dur);
-          bp.Q.value = rand(1, 8);
-          const g = ctx.createGain();
-          g.gain.setValueAtTime(gain, t);
-          g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-          src.connect(bp); bp.connect(g); route(g, panV);
-          src.start(t, rand(0, 0.5)); src.stop(t + dur + 0.02);
-        }
+        // One-shot sound makers (beep/sweep/noiseBurst come from makeSirenChain) --
         function alarmTrain(panV) {
           const f = Math.random() < 0.5 ? 880 : 1320;
           const n = 4 + Math.floor(Math.random() * 6);
@@ -707,8 +741,9 @@
           if (sirenCtx !== ctx) return;
           const t = ctx.currentTime;
           const intensity = Math.min(1, (t - startedAt) / 6);
-          const level = SIREN_LEVEL * sirenDuck * (0.7 + 0.3 * intensity);
+          const level = SIREN_LEVEL * (0.7 + 0.3 * intensity);
           master.gain.setTargetAtTime(t < dropUntil ? level * 0.04 : level, t, t < dropUntil ? 0.01 : 0.03);
+          out.gain.setTargetAtTime(currentSirenDuck(), t, 0.04); // voice ducking, after the distortion
           while (twoToneNext < t + 0.6) {
             twoTone.frequency.setValueAtTime(twoToneHigh ? 960 : 770, twoToneNext);
             twoToneHigh = !twoToneHigh;
@@ -750,6 +785,118 @@
             ctx.close();
           } catch (e) {}
         }, 450);
+      } catch (e) {}
+    }
+
+    // --- Dying sirens (after OVERRIDE is confirmed) ---
+    // While the system reads out the recovery commands, the takeover sirens
+    // don't just cut off: they wind down like a distress call being brought
+    // under control. The wails sag in pitch, slow and lose their swing; the
+    // chaotic sputters thin out; a "mayday" distress pattern (three short,
+    // three long, three short) repeats ever further apart, lower and quieter;
+    // and when the screen turns green (see stopDyingSirens) there is one last
+    // low power-down before silence. Same ducking as the takeover sirens, so
+    // the voice reading the commands stays on top.
+    let dyingCtx = null;
+    let dyingNodes = null;
+    const DYING_LIFE_S = 28; // how long the sirens take to wind all the way down
+
+    function startDyingSirens() {
+      if (dyingCtx) return;
+      try {
+        const { ctx, master, out, analyser, route, rand, beep, sweep, noiseBurst } = makeSirenChain();
+        dyingCtx = ctx;
+        const t0 = ctx.currentTime;
+
+        // Two wails that sag, slow and calm down.
+        const wails = [[850, 0.5, -0.5, 0.5], [610, 0.75, 0.5, 0.34]].map(([base, rate, panV, gain]) => {
+          const osc = ctx.createOscillator(); osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(base, t0);
+          osc.frequency.exponentialRampToValueAtTime(base * 0.16, t0 + DYING_LIFE_S);   // pitch sags
+          const lfo = ctx.createOscillator(); lfo.type = 'sine';
+          lfo.frequency.setValueAtTime(rate, t0);
+          lfo.frequency.exponentialRampToValueAtTime(0.05, t0 + DYING_LIFE_S);          // wail slows to a crawl
+          const lfoGain = ctx.createGain();
+          lfoGain.gain.setValueAtTime(380, t0);
+          lfoGain.gain.exponentialRampToValueAtTime(10, t0 + DYING_LIFE_S);             // swing flattens out
+          lfo.connect(lfoGain); lfoGain.connect(osc.frequency);
+          const g = ctx.createGain();
+          g.gain.setValueAtTime(gain, t0);
+          g.gain.setTargetAtTime(0.0001, t0, DYING_LIFE_S / 4);                         // fades away
+          osc.connect(g); route(g, panV);
+          osc.start(t0); lfo.start(t0);
+          return { osc, lfo };
+        });
+
+        const decayAt = () => Math.exp(-(ctx.currentTime - t0) / 9);                     // 1 -> 0 over the readout
+
+        // "Mayday": 3 short, 3 long, 3 short, getting slower, lower and quieter.
+        let sosTimer = null;
+        function mayday() {
+          const e = ctx.currentTime - t0;
+          if (dyingCtx !== ctx || e > DYING_LIFE_S) return;
+          const f = 1000 * Math.pow(0.55, e / DYING_LIFE_S);
+          const amp = 0.34 * decayAt() + 0.02;
+          const unit = 0.13 * (1 + e / 12);
+          let at = 0;
+          [1, 1, 1, 3, 3, 3, 1, 1, 1].forEach((len) => {
+            const dur = unit * len;
+            setTimeout(() => { if (dyingCtx === ctx) beep(f, dur, 'square', amp, 0); }, at * 1000);
+            at += dur + unit;
+          });
+          sosTimer = setTimeout(mayday, (at + 1.2 + e / 3) * 1000);
+        }
+        mayday();
+
+        // Sputters: still glitching, but less and less as control comes back.
+        const tick = setInterval(() => {
+          if (dyingCtx !== ctx) return;
+          const e = ctx.currentTime - t0;
+          const d = decayAt();
+          out.gain.setTargetAtTime(currentSirenDuck(), ctx.currentTime, 0.04); // voice ducking, after the distortion
+          if (Math.random() < 0.5 * Math.exp(-e / 6)) {
+            const pick = Math.random();
+            const p = rand(-0.8, 0.8);
+            if (pick < 0.4) sweep(rand(1200, 2200) * d + 200, rand(60, 120), rand(0.4, 0.9), 'sawtooth', 0.34 * d, p); // falling dive
+            else if (pick < 0.75) noiseBurst(rand(0.05, 0.2), 0.5 * d, p);                                            // crackle
+            else beep(rand(300, 900) * (0.5 + d / 2), rand(0.04, 0.12), 'square', 0.3 * d, p);                         // stray blip
+          }
+        }, 140);
+
+        master.gain.setValueAtTime(0, t0);
+        master.gain.linearRampToValueAtTime(SIREN_LEVEL * 0.95, t0 + 0.25);
+        dyingNodes = { master, out, wails, tick, getSos: () => sosTimer, sweep, ctx, analyser };
+        // Failsafe: if the green "all clear" never arrives, end on our own.
+        setTimeout(() => { if (dyingCtx === ctx) stopDyingSirens(true); }, (DYING_LIFE_S + 8) * 1000);
+      } catch (e) {
+        // Web Audio unsupported/blocked -- the show still runs, just quieter
+      }
+    }
+
+    // finalGasp: one last low power-down before silence (when the screen goes
+    // green). false: just fade out (inactive tab etc.).
+    function stopDyingSirens(finalGasp) {
+      if (!dyingCtx) return;
+      const ctx = dyingCtx;
+      const nodes = dyingNodes;
+      dyingCtx = null;
+      dyingNodes = null;
+      try {
+        clearInterval(nodes.tick);
+        clearTimeout(nodes.getSos());
+        const now = ctx.currentTime;
+        const hold = finalGasp ? 0.9 : 0;   // keep the level up while the gasp plays
+        const fade = finalGasp ? 0.5 : 0.3;
+        const level = finalGasp ? SIREN_LEVEL * 0.7 : nodes.master.gain.value;
+        nodes.out.gain.setTargetAtTime(currentSirenDuck(), now, 0.04); // keep ducking the gasp if the voice has started
+        if (finalGasp) nodes.sweep(260, 34, 1.0, 'sawtooth', 0.6, 0);
+        nodes.master.gain.cancelScheduledValues(now);
+        nodes.master.gain.setValueAtTime(level, now);
+        nodes.master.gain.setValueAtTime(level, now + hold);
+        nodes.master.gain.linearRampToValueAtTime(0, now + hold + fade);
+        setTimeout(() => {
+          try { nodes.wails.forEach((w) => { w.osc.stop(); w.lfo.stop(); }); ctx.close(); } catch (e) {}
+        }, (hold + fade + 0.2) * 1000);
       } catch (e) {}
     }
 
@@ -797,6 +944,7 @@
         // that sequence actually finishes) calms it back down.
         stopMenacingMusic();
         stopRogueSirens();
+        startDyingSirens(); // the takeover sirens wind down while the recovery commands are read out
         overrideCommandEl.classList.remove('active');
         overrideInputEl.value = '';
         overrideInputEl.blur();
@@ -814,6 +962,7 @@
       } else {
         stopMenacingMusic();
         stopRogueSirens();
+        stopDyingSirens(true); // green = control restored: one last power-down, then silence
         overrideCommandEl.classList.remove('active');
         overrideInputEl.value = '';
         overrideInputEl.blur();
@@ -838,6 +987,7 @@
           try { videoEl.pause(); } catch (err) {}
           stopMenacingMusic();
           stopRogueSirens();
+          stopDyingSirens(false);
           dismissOverlay();
           document.body.style.filter = 'grayscale(1) brightness(0.35)';
           outputEl.textContent = '(inactive — another Chatbot Screen window is live)';
@@ -969,7 +1119,7 @@
         if (typeof data.rate_wpm === 'number' && data.rate_wpm > 0) rateWpm = data.rate_wpm;
         if (typeof data.has_music_file === 'boolean') hasMusicFile = data.has_music_file;
         if (typeof data.speaking === 'boolean' && window.__skullHead) window.__skullHead.setSpeaking(data.speaking);
-        setSirenDuck(data.speaking === true || data.mode === 'video'); // keep the voice/video audible over the sirens
+        setSirenDuck(data.speaking === true, data.mode === 'video'); // keep the voice/video audible over the sirens
         if (data.theme) applyTheme(data.theme);
 
         if (typeof data.clear_seq === 'number' && data.clear_seq !== lastClearSeq) {
