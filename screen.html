@@ -128,7 +128,11 @@
     aspect-ratio: 3 / 4;
     box-sizing: border-box;
     overflow: hidden;
-    filter: drop-shadow(0 0 16px var(--fg-glow));
+    /* No CSS blur here — the skull mesh now has a real WebGL bloom pass
+       (see skullApp.js's EffectComposer/UnrealBloomPass) that glows the
+       bright digit glyphs and rim highlights per-pixel. A CSS filter on
+       top of that would blur the whole element uniformly again, right
+       back to washing out the (now genuinely black) eye sockets. */
   }
 
   #showVideo {
@@ -200,7 +204,7 @@
     padding: 14px 32px 12px;
     animation: overridePulse 1.6s ease-in-out infinite;
   }
-  body[data-theme="red"] #overrideCommand { display: flex; }
+  #overrideCommand.active { display: flex; }
   @keyframes overridePulse {
     0%, 100% { box-shadow: 0 0 8px rgba(255, 59, 48, 0.4); }
     50% { box-shadow: 0 0 24px rgba(255, 59, 48, 0.85); }
@@ -495,17 +499,57 @@
       synthNodes = null;
     }
 
-    function applyTheme(theme) {
-      if (theme === currentTheme) return;
-      currentTheme = theme;
+    // Applies a STEADY colour (the digital rain, both panels, the head) —
+    // 'flicker' below alternates between calling this with 'red' then
+    // 'green' rather than being a colour of its own.
+    function setSteadyThemeColor(theme) {
       document.body.dataset.theme = theme;
       rainColor = THEME_RAIN_COLORS[theme] || THEME_RAIN_COLORS.green;
       if (window.__skullHead) window.__skullHead.setTheme(rainColor);
+    }
+
+    let flickerTimer = null;
+    function stopFlicker() {
+      if (flickerTimer) { clearTimeout(flickerTimer); flickerTimer = null; }
+    }
+    function scheduleFlickerTick() {
+      // A recursive setTimeout with a new random delay each time, not
+      // setInterval — an irregular cadence reads as a genuine flicker
+      // rather than a steady strobe.
+      flickerTimer = setTimeout(() => {
+        setSteadyThemeColor(document.body.dataset.theme === 'red' ? 'green' : 'red');
+        scheduleFlickerTick();
+      }, 90 + Math.random() * 200);
+    }
+
+    function applyTheme(theme) {
+      if (theme === currentTheme) return;
+      currentTheme = theme;
+      stopFlicker();
+      if (theme === 'flicker') {
+        // OVERRIDE was just confirmed: the code-entry field is done with
+        // and tension music cuts immediately, but the screen keeps
+        // flickering red/green — unsettled — while the "something is
+        // happening" commands play out. Only a later steady 'green' (the
+        // branch below, once Dialogue.py calls set_theme("green") after
+        // that sequence actually finishes) calms it back down.
+        stopMenacingMusic();
+        overrideCommandEl.classList.remove('active');
+        overrideInputEl.value = '';
+        overrideInputEl.blur();
+        overrideStatusEl.classList.remove('show');
+        setSteadyThemeColor('red');
+        scheduleFlickerTick();
+        return;
+      }
+      setSteadyThemeColor(theme);
       if (theme === 'red') {
         startMenacingMusic();
+        overrideCommandEl.classList.add('active');
         setTimeout(() => overrideInputEl.focus(), 60);
       } else {
         stopMenacingMusic();
+        overrideCommandEl.classList.remove('active');
         overrideInputEl.value = '';
         overrideInputEl.blur();
         overrideStatusEl.classList.remove('show');
@@ -604,6 +648,15 @@
         await typeUtterance(queue.shift(), typingGeneration);
       }
       typing = false;
+      // Tells Dialogue.py the typewriter has actually caught up to lastSeq —
+      // see wait_for_typing_idle(), used so the override sequence's audio
+      // doesn't start while the "commands typed live" text is still
+      // visibly mid-animation on screen.
+      fetch('/typing-idle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seq: lastSeq }),
+      }).catch(() => {});
     }
 
     function enterVideoMode() {

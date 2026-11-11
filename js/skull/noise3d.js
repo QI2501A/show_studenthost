@@ -1,8 +1,9 @@
 // Minimal seeded 3D value noise. Not "true" simplex noise (no external
 // dependency needed for this) — just smooth, deterministic, blob-scale
 // randomness used once at build time to seed the skull's assemble/dissolve
-// order (see skullField.js), so nearby points lock in together instead of
-// every point snapping independently.
+// order (see solidSkullGeometry.js's aDissolveSeed), so nearby vertices lock
+// in together instead of every vertex snapping independently. Also reused
+// at runtime in skullApp.js for the speaking-jaw flutter.
 function hash3(x, y, z, seed) {
   let n = x * 374761393 + y * 668265263 + z * 2147483647 + seed * 3266489917;
   n = (n ^ (n >>> 13)) * 1274126177;

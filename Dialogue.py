@@ -633,6 +633,19 @@ class _ScreenHandler(http.server.BaseHTTPRequestHandler):
             self.server.screen_ref.override_command_texts.put(text)
             self.send_response(204)
             self.end_headers()
+        elif self.path == "/typing-idle":
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b""
+            try:
+                seq = int(json.loads(raw).get("seq", 0)) if raw else 0
+            except Exception:
+                seq = 0
+            screen_ref = self.server.screen_ref
+            with screen_ref._idle_lock:
+                if seq > screen_ref._last_idle_seq:
+                    screen_ref._last_idle_seq = seq
+            self.send_response(204)
+            self.end_headers()
         else:
             self.send_response(404)
             self.end_headers()
@@ -717,6 +730,8 @@ class ChatbotScreen:
         self.override_command_texts: "queue.Queue[str]" = queue.Queue()
         self._music_path = music_path if (music_path and music_path.exists()) else None
         self._state_lock = threading.Lock()
+        self._idle_lock = threading.Lock()
+        self._last_idle_seq = 0
         self._state = {
             "seq": 0, "mode": "chat", "segments": [], "rate_wpm": SPEECH_RATE_WPM,
             "theme": "green", "clear_seq": 0, "speaking": False,
@@ -754,13 +769,36 @@ class ChatbotScreen:
                   f"Could not open a browser automatically. Open this URL yourself\n"
                   f"to see the chatbot screen and video:\n\n  {self.url}\n{bar}\n")
 
-    def show(self, segments: list[str]) -> None:
-        """Safe to call even when the screen is unavailable — becomes a no-op."""
+    def show(self, segments: list[str]) -> int:
+        """Safe to call even when the screen is unavailable — becomes a
+        no-op and returns -1. Returns the new seq otherwise, so a caller
+        that needs to know when the client has actually finished typing
+        this content can pass it to wait_for_typing_idle()."""
         if self.available and segments:
             with self._state_lock:
                 self._state["seq"] += 1
                 self._state["mode"] = "chat"
                 self._state["segments"] = list(segments)
+                return self._state["seq"]
+        return -1
+
+    def wait_for_typing_idle(self, seq: int, timeout_s: float = 30.0) -> bool:
+        """Blocks until the chatbot screen reports it has finished typing
+        out everything through the given seq (screen.html POSTs /typing-idle
+        once its queue drains), or timeout_s elapses as a safety net — same
+        pattern as play_video's /video-ended wait. Without this, Python has
+        no way to know the client's own typewriter animation is still
+        running and can move on to the next beat (e.g. speaking the next
+        line) well before the audience has finished reading the last one."""
+        if not self.available or seq < 0:
+            return True
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            with self._idle_lock:
+                if self._last_idle_seq >= seq:
+                    return True
+            time.sleep(0.1)
+        return False
 
     def show_heard(self, text: str) -> None:
         """Feeds the mic's live speech-to-text transcript to the screen's
@@ -846,11 +884,12 @@ class ChatbotScreen:
             with self._state_lock:
                 self._state["speaking"] = speaking
 
-    def show_terminal(self, lines: list[dict]) -> None:
+    def show_terminal(self, lines: list[dict]) -> int:
         """Mirrors the operator console's simulated command lines (see
         print_terminal) onto the chatbot screen itself, so the audience sees
         the same "something is happening" commands after OVERRIDE is
-        confirmed, not just the operator at their console."""
+        confirmed, not just the operator at their console. Returns the new
+        seq (see show()/wait_for_typing_idle())."""
         rendered = []
         for entry in lines:
             if "comment" in entry:
@@ -859,7 +898,7 @@ class ChatbotScreen:
                 rendered.append(f">>> {entry['cmd']}")
             elif "out" in entry:
                 rendered.append(str(entry["out"]))
-        self.show(rendered)
+        return self.show(rendered)
 
     def close(self) -> None:
         if self.httpd:
@@ -1161,6 +1200,18 @@ class VoiceListener:
                 # Belt-and-braces: Ctrl+C still works when it does reach this
                 # process, and must not escape uncaught either way.
                 return
+            except Exception as exc:
+                # The mic hardware/driver itself can throw here (confirmed
+                # live: PyAudio/PortAudio raising a raw OSError — "[Errno
+                # -9999] Unanticipated host error" — followed by a second
+                # OSError while the broken stream tries to close itself),
+                # which isn't an sr.RequestError and was crashing the whole
+                # show instead of falling back like every other mic failure
+                # here does. Any such error just means "the mic broke for
+                # this cue" — never worth taking the whole show down over.
+                print(f"[voice] microphone error ({exc}); falling back to typed keyword.")
+                _prompt_enter(prompt)
+                return
             if status == "override":
                 print(f"{ANSI['green']}> manual override — {keyword_norm} confirmed.{ANSI['reset']}")
                 return
@@ -1206,6 +1257,18 @@ class VoiceListener:
             except KeyboardInterrupt:
                 # Belt-and-braces: Ctrl+C still works when it does reach this
                 # process, and must not escape uncaught either way.
+                return
+            except Exception as exc:
+                # The mic hardware/driver itself can throw here (confirmed
+                # live: PyAudio/PortAudio raising a raw OSError — "[Errno
+                # -9999] Unanticipated host error" — followed by a second
+                # OSError while the broken stream tries to close itself),
+                # which isn't an sr.RequestError and was crashing the whole
+                # show instead of falling back like every other mic failure
+                # here does. Any such error just means "the mic broke for
+                # this cue" — never worth taking the whole show down over.
+                print(f"[voice] microphone error ({exc}); falling back to typed cue.")
+                _prompt_enter(prompt)
                 return
             if status == "override":
                 print(f"{ANSI['green']}> manual override — line confirmed.{ANSI['reset']}")
@@ -1486,15 +1549,20 @@ def run_override(override: dict, hub: HubClient, override_keyword: str, screen: 
 
     print(f"{ANSI['green']}> OVERRIDE CONFIRMED{ANSI['reset']}")
     hub.stop_show()
-    # Manual control restored — the screen goes back to green, fresh (this
-    # also stops the rogue-phase background music — see screen.html).
+    # The screen holds on a red/green flicker (not a calm green) while the
+    # "something is happening" commands play out — jumping straight to a
+    # steady green here (the old behaviour) let the resolution's spoken
+    # line start while those commands were still visibly mid-typewriter on
+    # screen, i.e. the audio arrived before the visuals had caught up. See
+    # the "flicker" branch in screen.html's applyTheme.
     screen.clear()
-    screen.set_theme("green")
+    screen.set_theme("flicker")
 
     for item in override["items"]:
         if item.get("type") == "terminal":
             print_terminal(item["lines"])
-            screen.show_terminal(item["lines"])  # audience sees the same commands, not just the operator
+            seq = screen.show_terminal(item["lines"])  # audience sees the same commands, not just the operator
+            screen.wait_for_typing_idle(seq)  # hold the flicker until the screen has actually finished typing them
             continue
         print(f"\n{item.get('icon', '')} {ANSI['bold']}{item['title']}{ANSI['reset']}")
         if item.get("body"):
@@ -1502,6 +1570,13 @@ def run_override(override: dict, hub: HubClient, override_keyword: str, screen: 
         if item.get("screen_green"):
             print_screen("\n".join(item["screen_green"]), color=ANSI["green"])
         time.sleep(1.5)
+
+    # Only now — once the whole confirmation sequence has actually played
+    # out on screen — does it settle to a steady green. Manual control is
+    # restored, and this also stops the rogue-phase background music if it
+    # hadn't already (see screen.html).
+    screen.clear()
+    screen.set_theme("green")
 
 
 def run_resolution(resolution: dict, voice: Voice, listener: VoiceListener) -> None:

@@ -1,20 +1,26 @@
 import * as THREE from 'three';
-import { buildSkullField } from './skullField.js';
-import { buildGlyphAtlas } from './glyphAtlas.js';
-import { vertexShader, fragmentShader } from './rainShader.js';
+import { EffectComposer } from '../../vendor/three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from '../../vendor/three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from '../../vendor/three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from '../../vendor/three/addons/postprocessing/OutputPass.js';
+import { buildSolidSkullGeometry } from './solidSkullGeometry.js';
+import { buildDigitTexture } from './digitTexture.js';
+import { vertexShader, fragmentShader } from './skullShader.js';
 import { createEnvelopeFollower } from './audioEnvelope.js';
+import { makeNoise3D } from './noise3d.js';
 
-// Orchestrates the whole Matrix digital-rain skull: scene/camera/renderer
-// setup, the render loop, and the small public API screen.html's existing
-// polling loop drives (setSpeaking / setTheme). See the module docstrings in
-// skullField.js and rainShader.js for how the assemble/dissolve and
-// audio-reactive jaw actually work.
+// Orchestrates the humanoid head: a SOLID digital-rain-textured skull mesh
+// (not a particle field -- see solidSkullGeometry.js/skullShader.js for why
+// that switch happened: true black eye sockets and a crisp silhouette need
+// real geometry, not sparse additive-blended points), a real bloom
+// post-process for the glow, and the small public API screen.html's
+// existing polling loop drives (setSpeaking / setTheme).
 export function initSkull({
   container,
   audioEl = null,
-  pointCount = 16000,
   color = '#00ff41',
   hotColor = '#baffcb',
+  darkColor = '#020402',
 } = {}) {
   const width = container.clientWidth || 300;
   const height = container.clientHeight || 360;
@@ -26,37 +32,42 @@ export function initSkull({
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(32, width / height, 0.1, 20);
-  camera.position.set(0, 0.05, 5.2);
+  const camera = new THREE.PerspectiveCamera(30, width / height, 0.1, 20);
+  camera.position.set(0, 0.02, 4.6);
 
-  const fieldHeight = 3.2;
-  const { geometry } = buildSkullField({ count: pointCount, fieldHeight });
-  const atlas = buildGlyphAtlas({ cols: 8, rows: 8, cell: 64 });
+  const geometry = buildSolidSkullGeometry();
+  const digitTex = buildDigitTexture();
 
   const material = new THREE.ShaderMaterial({
     vertexShader,
     fragmentShader,
-    transparent: true,
-    depthWrite: false,
-    depthTest: false,
-    blending: THREE.AdditiveBlending,
+    transparent: false,
+    depthWrite: true,
+    depthTest: true,
     uniforms: {
-      uTime: { value: 0 },
       uFormAmount: { value: 0 },
       uJawAmount: { value: 0 },
       uMouthGlow: { value: 0 },
-      uFieldHeight: { value: fieldHeight },
-      uPointSize: { value: 0.05 },
-      uAtlas: { value: atlas.texture },
-      uAtlasGrid: { value: new THREE.Vector2(atlas.cols, atlas.rows) },
+      uDigitTex: { value: digitTex },
+      uTexTiling: { value: 10.0 },
       uColor: { value: new THREE.Color(color) },
       uHotColor: { value: new THREE.Color(hotColor) },
+      uDarkColor: { value: new THREE.Color(darkColor) },
     },
   });
 
-  const field = new THREE.Mesh(geometry, material);
-  field.frustumCulled = false;
-  scene.add(field);
+  const mesh = new THREE.Mesh(geometry, material);
+  scene.add(mesh);
+
+  // A dim ambient light so the fresnel/normal-based rim has something to
+  // read against even where the digit texture and glow contribute little.
+  scene.add(new THREE.AmbientLight(0xffffff, 0.15));
+
+  const composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  const bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 0.55, 0.55, 0.16);
+  composer.addPass(bloomPass);
+  composer.addPass(new OutputPass());
 
   const envelope = audioEl ? createEnvelopeFollower(audioEl) : null;
   if (audioEl) {
@@ -64,14 +75,15 @@ export function initSkull({
       if (envelope.ensureGraph()) envelope.resume();
     });
   }
+  const jawNoise = makeNoise3D(4242);
 
   const state = {
     formAmount: 0,
     targetForm: 0,
     speaking: false,
     // Runs a self-contained assemble/hold/dissolve/pause demo timeline until
-    // the first real setSpeaking() call arrives — lets this whole pipeline
-    // be verified visually with no audio/state wiring at all (Phase 3).
+    // the first real setSpeaking() call arrives -- lets this whole pipeline
+    // be verified visually with no audio/state wiring at all.
     demo: true,
     demoT: 0,
   };
@@ -91,16 +103,17 @@ export function initSkull({
     const h = container.clientHeight || height;
     if (w === 0 || h === 0) return;
     renderer.setSize(w, h);
+    composer.setSize(w, h);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
   }
   window.addEventListener('resize', resize);
   // The head panel can change size when it's toggled visible/hidden (video
-  // mode) without a window resize firing — a ResizeObserver catches that too.
+  // mode) without a window resize firing -- a ResizeObserver catches that too.
   try {
     new ResizeObserver(resize).observe(container);
   } catch (e) {
-    // ResizeObserver unsupported in some embedded contexts — window resize still covers most cases
+    // ResizeObserver unsupported in some embedded contexts -- window resize still covers most cases
   }
 
   const clock = new THREE.Clock();
@@ -131,20 +144,24 @@ export function initSkull({
       jaw = Math.min(1, env * 3.2);
       glow = Math.min(1, env * 2.2);
     } else if (state.speaking) {
-      // Heuristic fallback: no live audio graph available yet (analyser
-      // failed to init, or audio hasn't started playing this instant) — a
-      // synthesized flutter, same category of approximation as the old
-      // SVG head's random mouth movement, so speaking still reads visually.
-      jaw = 0.25 + 0.2 * Math.sin(t * 9.0);
-      glow = 0.3;
+      // Heuristic fallback: no live audio graph available yet. A single
+      // sine wave reads as a metronome, not speech -- real jaw movement is
+      // irregular and syllable-like. Three noise octaves at incommensurate
+      // rates (so their sum never repeats on any observable timescale)
+      // approximate that much better.
+      const n1 = jawNoise(t * 3.1, 0, 0);
+      const n2 = jawNoise(t * 7.3, 50, 0);
+      const n3 = jawNoise(t * 13.0, 120, 0);
+      const flutter = n1 * 0.5 + n2 * 0.32 + n3 * 0.18;
+      jaw = Math.max(0, flutter - 0.12) * 1.15;
+      glow = 0.12 + flutter * 0.38;
     }
 
-    material.uniforms.uTime.value = t;
     material.uniforms.uFormAmount.value = state.formAmount;
     material.uniforms.uJawAmount.value = jaw;
     material.uniforms.uMouthGlow.value = glow;
 
-    renderer.render(scene, camera);
+    composer.render();
   }
   animate();
 
@@ -153,7 +170,7 @@ export function initSkull({
     window.removeEventListener('resize', resize);
     geometry.dispose();
     material.dispose();
-    atlas.texture.dispose();
+    digitTex.dispose();
     renderer.dispose();
     if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
   }
