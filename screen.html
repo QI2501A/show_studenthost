@@ -188,6 +188,28 @@
     object-fit: contain;
     background: #000;
   }
+  /* Intro/welcome overlay. Opaque, so fading its opacity 1 -> 0 over the
+     fully-drawn rain beneath is exactly a linear crossfade:
+     out = a*intro + (1-a)*rain. Sits above #startOverlay (999). */
+  #introOverlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: #000;
+    opacity: 1;
+  }
+  body[data-intro="on"] #introOverlay { display: block; }
+  #introOverlay.fading { opacity: 0; transition: opacity var(--intro-fade, 5s) ease-in-out; }
+  #introFrame {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: #000;
+    pointer-events: none;
+  }
   #startOverlay {
     position: fixed;
     inset: 0;
@@ -289,7 +311,7 @@
   .oc-status.show { opacity: 1; }
 </style>
 </head>
-<body>
+<body data-intro="off">
   <canvas id="rain"></canvas>
 
   <div class="panel" id="heardPanel">
@@ -314,6 +336,12 @@
   <div id="rogueSkullR" class="rogueSkull"></div>
 
   <video id="showVideo" playsinline></video>
+  <!-- Welcome/intro page: covers everything from the first paint until SPACE
+       (see the intro script below), then crossfades out over 5s to reveal the
+       digital rain. Dialogue.py flips body[data-intro] to "on" when an intro
+       page is configured. tabindex=-1 + pointer-events:none keep keyboard
+       focus on THIS page: the intro page pauses itself on SPACE. -->
+  <div id="introOverlay" aria-hidden="true"><iframe id="introFrame" tabindex="-1" title="Welcome"></iframe></div>
   <audio id="rogueMusic" loop preload="none"></audio>
 
   <div id="startOverlay"><div class="msg">&gt; CLICK TO ACTIVATE SYSTEM CHANNEL<br>(enters full-screen)</div></div>
@@ -370,8 +398,49 @@
           setTimeout(() => { overrideHint.classList.remove('flash'); overrideInFlight = false; }, 300);
         });
     }
+    // --- Intro: welcome page -> digital rain ---
+    // 'off' (no intro configured) | 'waiting' (intro up, waiting for SPACE) |
+    // 'fading' (crossfading out) | 'done'. While it's waiting/fading SPACE
+    // belongs to the intro: it must NOT also reach sendOverride() below, or
+    // the same press would confirm the show's first student cue.
+    let introPhase = document.body.dataset.intro === 'on' ? 'waiting' : 'off';
+    let introFadeMs = 5000;
+    const introOverlay = document.getElementById('introOverlay');
+    const introFrame = document.getElementById('introFrame');
+    if (introPhase === 'waiting') introFrame.src = '/intro';
+
+    function finishIntro() {
+      if (introPhase === 'done') return;
+      introPhase = 'done';
+      document.body.dataset.intro = 'done';   // hides the overlay
+      introFrame.src = 'about:blank';          // stop the intro animation: free the CPU for the show
+      fetch('/intro-done', { method: 'POST' }).catch(() => {});
+    }
+    function startIntro() {
+      if (introPhase !== 'waiting') return;
+      introPhase = 'fading';
+      try {
+        // SPACE is a user gesture, so this can go full-screen (and unlocks
+        // audio autoplay for the videos/sirens later) -- the "click to
+        // activate" overlay it replaces is hidden beneath the intro.
+        const el = document.documentElement;
+        const request = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+        if (request && !document.fullscreenElement) request.call(el).catch(() => {});
+      } catch (e) {}
+      fetch('/intro-start', { method: 'POST' }).catch(() => {});
+      introOverlay.style.setProperty('--intro-fade', (introFadeMs / 1000) + 's');
+      void introOverlay.offsetWidth;           // commit opacity:1 first so the transition actually runs
+      introOverlay.classList.add('fading');
+      setTimeout(finishIntro, introFadeMs + 200);
+    }
+
     document.addEventListener('keydown', (e) => {
       if (e.target && e.target.id === 'overrideInput') return; // typing the OVERRIDE code, not a cue-confirm
+      if (introPhase === 'waiting' || introPhase === 'fading') {
+        if (e.code === 'Space' || e.code === 'Enter') e.preventDefault();
+        if (e.code === 'Space' && !e.repeat) startIntro();
+        return; // never a cue-confirm while the intro owns the screen
+      }
       if (e.code === 'Space' || e.code === 'Enter') {
         e.preventDefault();
         sendOverride();
@@ -1158,6 +1227,8 @@
       try {
         const res = await fetch('/state', { cache: 'no-store' });
         const data = await res.json();
+        if (typeof data.intro_fade_s === 'number' && data.intro_fade_s > 0) introFadeMs = data.intro_fade_s * 1000;
+        if (data.intro === 'go') startIntro(); // started from somewhere other than this page (terminal ENTER, a future trigger)
         if (typeof data.rate_wpm === 'number' && data.rate_wpm > 0) rateWpm = data.rate_wpm;
         if (typeof data.has_music_file === 'boolean') hasMusicFile = data.has_music_file;
         if (typeof data.speaking === 'boolean' && window.__skullHead) window.__skullHead.setSpeaking(data.speaking);

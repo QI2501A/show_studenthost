@@ -63,7 +63,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONTENT = ROOT.parent / "robot-revolution" / "content.json"
-DEFAULT_VIDEO = ROOT.parent / "DroneHub_Video.mp4"
+DEFAULT_VIDEO = ROOT.parent / "DroneHub_V3.mp4"  # played when IGNITE fires (the 5824x1248 video-wall cut)
+LEGACY_VIDEO = ROOT.parent / "DroneHub_Video.mp4"  # the previous cut -- only used if V3 isn't on this machine
+# The welcome/intro page shown on the chatbot screen before the show starts
+# (see ChatbotScreen.run_intro). A self-contained animated canvas page.
+INTRO_PAGE = ROOT / "intro" / "drone_hub_welcome_ite.html"
+INTRO_FADE_S = 5.0  # seconds for the intro to crossfade into the digital rain
 DEFAULT_ROGUE_VIDEO = ROOT.parent / "DH_Asset6_RobotRevolution.mp4"  # placeholder, to be replaced later
 
 ANSI = {
@@ -572,6 +577,22 @@ class _ScreenHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.split("?", 1)[0] == "/intro":
+            try:
+                body = INTRO_PAGE.read_bytes()
+            except OSError:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except ConnectionError:
+                pass
         elif self.path.startswith("/video"):
             self._serve_video()
         elif self.path.startswith("/music"):
@@ -622,6 +643,14 @@ class _ScreenHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
         elif self.path == "/override":
             self.server.screen_ref._manual_override.set()
+            self.send_response(204)
+            self.end_headers()
+        elif self.path == "/intro-start":
+            self.server.screen_ref.start_intro()
+            self.send_response(204)
+            self.end_headers()
+        elif self.path == "/intro-done":
+            self.server.screen_ref._intro_done.set()
             self.send_response(204)
             self.end_headers()
         elif self.path == "/confirm-override-command":
@@ -726,8 +755,15 @@ class ChatbotScreen:
 
     PORT = 8765
 
-    def __init__(self, enabled: bool = True, music_path: "Path | None" = None) -> None:
+    def __init__(self, enabled: bool = True, music_path: "Path | None" = None, intro: bool = False) -> None:
         self.available = False
+        # Intro: the welcome page covers the screen from the moment it opens,
+        # until run_intro() is told to start (SPACE on the screen, ENTER at the
+        # terminal, or POST /intro-start from anything else). Only if the page
+        # file is actually here.
+        self.intro_enabled = bool(intro and enabled and INTRO_PAGE.is_file())
+        self._intro_start = threading.Event()
+        self._intro_done = threading.Event()
         self.url = None
         self.httpd = None
         self._video_path: Path | None = None
@@ -744,12 +780,17 @@ class ChatbotScreen:
             "has_music_file": self._music_path is not None,
             "heard_seq": 0, "heard_segments": [],
             "override_feedback_seq": 0, "override_feedback_ok": True,
+            "intro": "waiting" if self.intro_enabled else "off", "intro_fade_s": INTRO_FADE_S,
         }
         if not enabled:
             return
         html_path = ROOT / "screen.html"
         try:
             html = html_path.read_text(encoding="utf-8")
+            if self.intro_enabled:
+                # Baked into the page itself so the intro covers the screen from
+                # the very first paint, not after its first /state poll.
+                html = html.replace('data-intro="off"', 'data-intro="on"', 1)
             self.httpd = _ScreenHTTPServer(("127.0.0.1", self.PORT), _ScreenHandler)
             self.httpd.screen_html = html
             self.httpd.state_lock = self._state_lock
@@ -774,6 +815,41 @@ class ChatbotScreen:
             print(f"\n{bar}\n"
                   f"Could not open a browser automatically. Open this URL yourself\n"
                   f"to see the chatbot screen and video:\n\n  {self.url}\n{bar}\n")
+
+    def start_intro(self) -> None:
+        """Triggers the intro -> digital rain crossfade. Called by SPACE on
+        the screen (via POST /intro-start), ENTER at the terminal, or any
+        other trigger that can POST /intro-start later on."""
+        with self._state_lock:
+            if self._state["intro"] == "waiting":
+                self._state["intro"] = "go"  # the page polls this, so a trigger from elsewhere starts its fade too
+        self._intro_start.set()
+
+    def run_intro(self) -> None:
+        """Holds the show on the intro page until it's triggered, then waits
+        for it to finish crossfading into the digital rain -- so the chatbot
+        only starts once the matrix screen is fully up. No-op without an
+        intro page / screen (or with --no-intro)."""
+        if not self.intro_enabled or not self.available:
+            return
+        print(f"\n{ANSI['amber']}> INTRO SCREEN UP.{ANSI['reset']}  Press SPACE on the chatbot screen "
+              f"(or ENTER here) to begin — it crossfades into the digital rain over {INTRO_FADE_S:.0f}s, "
+              f"then the show starts.")
+        while _terminal_key_ready():  # discard stray keystrokes from earlier, so they can't start it
+            _consume_terminal_key()
+        with _TerminalRawMode():
+            while not self._intro_start.is_set():
+                if _terminal_key_ready():
+                    _consume_terminal_key()
+                    self.start_intro()
+                    break
+                self._intro_start.wait(0.1)
+        print(f"{ANSI['green']}> intro started — crossfading to the rain...{ANSI['reset']}")
+        if not self._intro_done.wait(INTRO_FADE_S + 8):
+            print("[screen] intro did not report finishing; continuing anyway.")
+        with self._state_lock:
+            self._state["intro"] = "done"
+        self._manual_override.clear()  # a SPACE press that started the intro must not also confirm the first cue
 
     def show(self, segments: list[str]) -> int:
         """Safe to call even when the screen is unavailable — becomes a
@@ -1795,8 +1871,10 @@ def main() -> None:
     parser.add_argument("--speed", type=float, default=1.0,
                          help="playback speed multiplier for the rise/rogue videos (>1 = faster; for rehearsal)")
     parser.add_argument("--no-screen", action="store_true", help="skip the Matrix-style chatbot browser screen")
+    parser.add_argument("--no-intro", action="store_true",
+                        help="skip the welcome/intro page and start the show immediately (for rehearsal)")
     parser.add_argument("--video", default=None,
-                         help="path to the rise-phase video (default: ../DroneHub_Video.mp4, or config.yaml's rise_video)")
+                         help="path to the rise-phase video played on IGNITE (default: ../DroneHub_V3.mp4, or config.yaml's rise_video)")
     parser.add_argument("--rogue-video", default=None,
                          help="path to the rogue-phase video (default: ../DH_Asset6_RobotRevolution.mp4, "
                               "or config.yaml's rogue_video)")
@@ -1804,11 +1882,15 @@ def main() -> None:
 
     cfg = load_show_host_config()
     music_path = resolve_optional_path(cfg, "rogue_music")
-    screen = ChatbotScreen(enabled=not args.no_screen, music_path=music_path)
+    screen = ChatbotScreen(enabled=not args.no_screen, music_path=music_path, intro=not args.no_intro)
     try:
         content = load_content(args.content)
         live = fetch_live_data(cfg)
         rise_video_path = resolve_video_path(args.video, cfg, "rise_video", DEFAULT_VIDEO)
+        if not rise_video_path.exists() and rise_video_path == DEFAULT_VIDEO and LEGACY_VIDEO.exists():
+            print(f"[video] {DEFAULT_VIDEO.name} not found next to the show folder; "
+                  f"falling back to the older {LEGACY_VIDEO.name}.")
+            rise_video_path = LEGACY_VIDEO
         rogue_video_path = resolve_video_path(args.rogue_video, cfg, "rogue_video", DEFAULT_ROGUE_VIDEO)
         voice = Voice(screen)
         listener = VoiceListener(screen)
@@ -1817,6 +1899,7 @@ def main() -> None:
         ignite_keyword = content["ignite"].get("keyword", "IGNITE").rstrip(".")
         override_keyword = find_meta_value(content["cover"].get("meta", []), "Override keyword", "OVERRIDE")
 
+        screen.run_intro()  # welcome page first; the chatbot only starts once it has crossfaded into the rain
         print_banner(content["cover"])
         run_preshow(content["preshow"], live, voice, listener, ignite_keyword)
         run_ignite(content["ignite"], args.hub_url, voice)

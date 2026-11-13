@@ -13,7 +13,7 @@ It's a real listening conversation, not an operator-paced slideshow — there is
 - **It listens for the student.** For every student line in the transcript, `Dialogue.py` listens on the microphone (`SpeechRecognition`) until it hears the student actually say (approximately) that line, then immediately continues — the way a real scene partner would.
 - **It answers automatically.** As soon as the student's cue is heard, the chatbot's next line is filled in with live data — `[DAY]` / `[DATE]` / `[TIME]` / `[WEATHER]` / `[TEMP]` / `[ROBOTICS NEWS HEADLINE]` from free, keyless APIs ([Open-Meteo](https://open-meteo.com/) for weather, coordinates in `config.yaml`; Google News RSS for the headline) — spoken aloud and shown on the chatbot screen (see below).
 - **It pauses where the script says to.** A blank line (`\n\n`, content.json's own paragraph-gap convention) inside a chatbot line becomes an actual spoken pause — e.g. a beat after reporting the weather, before the next thought — not just a visual line break.
-- **IGNITE spawns `main.py`, then plays the rise-phase video.** The moment the student says the IGNITE keyword, `Dialogue.py` runs [`main.py`](main.py) as its own process — matching the deck's own ignite chip, "What fires: main.py · all units" — which signals hub_dashboard to start the robot show (`POST /api/show/start`). It then plays the rise-phase video full-screen on the chatbot screen (default `../DroneHub_Video.mp4`; see config below) and blocks until it actually finishes.
+- **IGNITE spawns `main.py`, then plays the rise-phase video.** The moment the student says the IGNITE keyword, `Dialogue.py` runs [`main.py`](main.py) as its own process — matching the deck's own ignite chip, "What fires: main.py · all units" — which signals hub_dashboard to start the robot show (`POST /api/show/start`). It then plays the rise-phase video full-screen on the chatbot screen (default `../DroneHub_V3.mp4`; see config below) and blocks until it actually finishes.
 - **The rogue turn is autonomous.** As soon as the video ends, the chatbot declares it's "taking over" — the screen wipes clean, flips red, menacing background music starts, and the line is spoken the instant that happens, with no cue needed and no lag (see The chatbot screen, below).
 - **A second video plays on the red screen.** Right after that line, `Dialogue.py` plays a rogue-phase video (default `../DH_Asset6_RobotRevolution.mp4`, currently a placeholder — see config below) full-screen, same as the rise-phase one. Once it ends, the show holds on the red screen — nothing happens on its own from here except the background music looping.
 - **OVERRIDE is typed, or given on-screen.** Matching the story (the student physically returns to the terminal), `Dialogue.py` waits for the OVERRIDE command to be *typed* into this terminal window — or given via the pulsing **OVERRIDE** control on the chatbot screen itself (see below), for whichever one actually has focus. Once confirmed, it calls `POST /api/show/stop`, mirrors the same simulated command lines onto the chatbot screen that print in this terminal ("showing that something is happening" to the audience too), the music stops, and the screen reverts to green.
@@ -55,6 +55,16 @@ Loops for the whole red "system has taken over" phase — starts the instant the
 - **Commands read out on OVERRIDE.** While the recovery commands type on screen, the system reads them aloud (`speak_override_readout` in `Dialogue.py`, which turns `assert_control(engineer_id=01)` into "assert control, engineer I D zero 1") in a "dying transformer taken over by code" voice (`voicefx.dying_transformer`): pitch and speed sag with a growing motor wobble while bit-crush, sample-hold, ring-mod, dropouts, stutters, static and data chirps take over, ending in a power-down whine. The corruption builds across the lines, then the next chatbot line ("Manual control confirmed...") is back in the normal voice.
 - Both voice effects need `numpy` and run on Windows (SAPI → WAV → `winsound`). If numpy is missing or anything fails they fall back to the plain voice at a slower rate, never silence. On macOS the same lines use `say`'s own pitch commands instead.
 
+## The welcome/intro page
+
+Before the show starts, the chatbot screen opens on **`intro/drone_hub_welcome_ite.html`** — an animated "Welcome to Drone Hub 2.0" page (a self-contained 5824x1248 canvas animation, scaled to fit the screen) — and `Dialogue.py` holds there, with the chatbot silent, until it's triggered:
+
+- **Trigger:** press **SPACE** on the chatbot screen (or **ENTER** at the terminal). Right now that's the only trigger; anything that can `POST http://127.0.0.1:8765/intro-start` will do the same, so wiring it to the hub dashboard later is one HTTP call.
+- **What happens:** the intro **crossfades over 5 seconds** into the digital rain (a true linear crossfade, eased at both ends — `INTRO_FADE_S` in `Dialogue.py`). Once the fade has finished the intro animation is shut down to free the CPU and the show starts: banner, then the chatbot's first line.
+- SPACE during the intro belongs to the intro only — it is *not* also a cue-confirm, so it can't skip the first student line. SPACE/ENTER go back to confirming cues once the show is running. SPACE is also a user gesture, so it takes the screen full-screen and unlocks audio for the videos and sirens.
+- `--no-intro` skips it and starts the show immediately (rehearsals). With `--no-screen`, or if the page file is missing, the intro is skipped automatically.
+- The intro page keeps its own SPACE-to-pause handler; the screen never gives it keyboard focus, so that handler never fires here. The 12s `.mp4` render of the same page (not in this repo) isn't used by the show — the live HTML is.
+
 ## The two videos
 
 Both play full-screen on the chatbot screen and **block until they actually finish** — the timing of the next beat follows the video's real length rather than a fixed estimate, using the same mechanism for each:
@@ -63,7 +73,7 @@ Both play full-screen on the chatbot screen and **block until they actually fini
 |---|---|---|
 | Fires | Once IGNITE fires and `main.py` has signalled hub_dashboard | Immediately after the chatbot speaks the "taking over" line |
 | Then | Moves on to the rogue "taking over" line | Holds on the red screen — nothing happens on its own until OVERRIDE |
-| Default path | `../DroneHub_Video.mp4` | `../DH_Asset6_RobotRevolution.mp4` *(placeholder — swap for the real cut later)* |
+| Default path | `../DroneHub_V3.mp4` *(5824x1248 video-wall cut, 3:08; falls back to the older `../DroneHub_Video.mp4` if V3 isn't on the machine)* | `../DH_Asset6_RobotRevolution.mp4` *(placeholder — swap for the real cut later)* |
 | Config override | `rise_video:` in `config.yaml` | `rogue_video:` in `config.yaml` |
 | CLI override | `--video /path/to/file.mp4` | `--rogue-video /path/to/file.mp4` |
 
@@ -128,7 +138,8 @@ Options:
 ```bash
 python Dialogue.py --hub-url http://localhost:5050   # default; override if the dashboard runs elsewhere
 python Dialogue.py --content /path/to/content.json   # default: ../robot-revolution/content.json
-python Dialogue.py --video /path/to/file.mp4         # default: ../DroneHub_Video.mp4 (or config.yaml's rise_video)
+python Dialogue.py --video /path/to/file.mp4         # default: ../DroneHub_V3.mp4 (or config.yaml's rise_video)
+python Dialogue.py --no-intro                        # skip the welcome page; start the show immediately
 python Dialogue.py --rogue-video /path/to/file.mp4   # default: ../DH_Asset6_RobotRevolution.mp4 (or config.yaml's rogue_video)
 python Dialogue.py --speed 5                         # rehearsal: plays both videos at 5x speed
 python Dialogue.py --no-screen                       # skip the chatbot screen (and both videos with it)
@@ -143,6 +154,7 @@ Dialogue.py        The chatbot: live data, TTS, listens for student cues, spawns
 main.py            Fired by Dialogue.py once IGNITE is heard — signals hub_dashboard (POST /api/show/start) then exits
 voicefx.py         Audio effects for the rogue voice and the "dying transformer" command readout (needs numpy; optional)
 screen.html        The chatbot screen's page — served locally by Dialogue.py, opened in your browser automatically
+intro/             The welcome page shown before the show starts (drone_hub_welcome_ite.html), crossfaded into the rain on SPACE
 js/skull/          The humanoid head: a Three.js digital-rain skull (separate build), mounted by screen.html
 vendor/three/      Three.js r160 + the addons the head build needs (MeshSurfaceSampler, EffectComposer/RenderPass/UnrealBloomPass/OutputPass + their shader deps) — vendored, no npm install required
 config.yaml        Venue lat/lon/timezone for the weather pull, both video paths, and optional rogue_music — this folder's own config
