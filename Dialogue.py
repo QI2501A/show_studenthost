@@ -69,7 +69,10 @@ LEGACY_VIDEO = ROOT.parent / "DroneHub_Video.mp4"  # the previous cut -- only us
 # (see ChatbotScreen.run_intro). A self-contained animated canvas page.
 INTRO_PAGE = ROOT / "intro" / "drone_hub_welcome_ite.html"
 INTRO_FADE_S = 5.0  # seconds for the intro to crossfade into the digital rain
-DEFAULT_ROGUE_VIDEO = ROOT.parent / "DH_Asset6_RobotRevolution.mp4"  # placeholder, to be replaced later
+# The rogue-phase "brain" video. The export in ../DH_Asset6_RobotRevolution.mp4 is
+# 3:08 but only its first 12.7s have picture (the rest is black and silent), so
+# the show plays a lossless trim of it instead; the original is left untouched.
+DEFAULT_ROGUE_VIDEO = ROOT.parent / "DH_Asset6_RobotRevolution_trim.mp4"
 
 ANSI = {
     "reset": "\033[0m",

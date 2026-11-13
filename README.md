@@ -73,7 +73,7 @@ Both play full-screen on the chatbot screen and **block until they actually fini
 |---|---|---|
 | Fires | Once IGNITE fires and `main.py` has signalled hub_dashboard | Immediately after the chatbot speaks the "taking over" line |
 | Then | Moves on to the rogue "taking over" line | Holds on the red screen — nothing happens on its own until OVERRIDE |
-| Default path | `../DroneHub_V3.mp4` *(5824x1248 video-wall cut, 3:08; falls back to the older `../DroneHub_Video.mp4` if V3 isn't on the machine)* | `../DH_Asset6_RobotRevolution.mp4` *(placeholder — swap for the real cut later)* |
+| Default path | `../DroneHub_V3.mp4` *(5824x1248 video-wall cut, 3:08; falls back to the older `../DroneHub_Video.mp4` if V3 isn't on the machine)* | `../DH_Asset6_RobotRevolution_trim.mp4` *(the red-eyed head, 12.8s — a lossless trim of `../DH_Asset6_RobotRevolution.mp4`, whose export is 3:08 but black and silent after 12.7s)* |
 | Config override | `rise_video:` in `config.yaml` | `rogue_video:` in `config.yaml` |
 | CLI override | `--video /path/to/file.mp4` | `--rogue-video /path/to/file.mp4` |
 
@@ -140,7 +140,7 @@ python Dialogue.py --hub-url http://localhost:5050   # default; override if the 
 python Dialogue.py --content /path/to/content.json   # default: ../robot-revolution/content.json
 python Dialogue.py --video /path/to/file.mp4         # default: ../DroneHub_V3.mp4 (or config.yaml's rise_video)
 python Dialogue.py --no-intro                        # skip the welcome page; start the show immediately
-python Dialogue.py --rogue-video /path/to/file.mp4   # default: ../DH_Asset6_RobotRevolution.mp4 (or config.yaml's rogue_video)
+python Dialogue.py --rogue-video /path/to/file.mp4   # default: ../DH_Asset6_RobotRevolution_trim.mp4 (or config.yaml's rogue_video)
 python Dialogue.py --speed 5                         # rehearsal: plays both videos at 5x speed
 python Dialogue.py --no-screen                       # skip the chatbot screen (and both videos with it)
 ```

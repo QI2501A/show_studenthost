@@ -17,10 +17,12 @@ venue_tz: Asia/Singapore
 # Played full-screen (still on the red "taken over" screen) right after the
 # chatbot speaks the rogue "taking over" line. Once it ends, the show holds
 # on that red screen — nothing further happens on its own — until the
-# student types OVERRIDE. Defaults to ../DH_Asset6_RobotRevolution.mp4
-# (currently a placeholder, to be swapped for the real cut later) — override
-# here, or per-run with `python Dialogue.py --rogue-video /path/to/file.mp4`.
-# rogue_video: ../DH_Asset6_RobotRevolution.mp4
+# student types OVERRIDE. Defaults to ../DH_Asset6_RobotRevolution_trim.mp4 —
+# a lossless trim to the first 12.75s of ../DH_Asset6_RobotRevolution.mp4
+# (that export is 3:08 but black and silent after 12.7s, which would hold a
+# black red screen for ~3 minutes). Override here, or per-run with
+# `python Dialogue.py --rogue-video /path/to/file.mp4`.
+# rogue_video: ../DH_Asset6_RobotRevolution_trim.mp4
 
 # Optional menacing background music, looped on the chatbot screen for the
 # whole red "system has taken over" phase — starts the instant the screen
