@@ -31,6 +31,12 @@ venue_tz: Asia/Singapore
 # here, or per-run with `python Dialogue.py --showcase-video /path/to/file.mp4`
 # (or skip it with --no-showcase).
 # showcase_video: ../Drone_Robotics_Hub_Showcase_5824x1248.mp4
+#
+# Played on repeat (silent, with a soft fade-in) once the showcase ends, until
+# the show is ended with ENTER at the terminal or Ctrl+C: a seamless 2.7s loop
+# of the showcase's opening title scene. If absent, the screen just holds the
+# showcase's last frame. Defaults to ../Drone_Robotics_Hub_Showcase_loop.mp4.
+# showcase_loop_video: ../Drone_Robotics_Hub_Showcase_loop.mp4
 
 # Optional menacing background music, looped on the chatbot screen for the
 # whole red "system has taken over" phase — starts the instant the screen

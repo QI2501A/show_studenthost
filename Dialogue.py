@@ -72,6 +72,10 @@ INTRO_FADE_S = 5.0  # seconds for the intro to crossfade into the digital rain
 # The closing showcase video: once the robots are back under control and the
 # show has reached its last screen, SPACE plays this (see run_showcase).
 DEFAULT_SHOWCASE_VIDEO = ROOT.parent / "Drone_Robotics_Hub_Showcase_5824x1248.mp4"
+# After the showcase ends, this silent seamless loop (the showcase's own opening
+# title scene, "DRONE & ROBOTICS HUB 2.0") plays on repeat until the operator
+# ends the show. Without it the screen just holds the showcase's last frame.
+DEFAULT_SHOWCASE_LOOP = ROOT.parent / "Drone_Robotics_Hub_Showcase_loop.mp4"
 # The rogue-phase "brain" video. The export in ../DH_Asset6_RobotRevolution.mp4 is
 # 3:08 but only its first 12.7s have picture (the rest is black and silent), so
 # the show plays a lossless trim of it instead; the original is left untouched.
@@ -196,6 +200,7 @@ def load_show_host_config() -> dict:
     defaults = {
         "venue_lat": 1.3840, "venue_lon": 103.7470, "venue_tz": "Asia/Singapore",
         "rise_video": None, "rogue_video": None, "rogue_music": None, "showcase_video": None,
+        "showcase_loop_video": None,
     }
     config_path = ROOT / "config.yaml"
     try:
@@ -787,7 +792,7 @@ class ChatbotScreen:
             "heard_seq": 0, "heard_segments": [],
             "override_feedback_seq": 0, "override_feedback_ok": True,
             "intro": "waiting" if self.intro_enabled else "off", "intro_fade_s": INTRO_FADE_S,
-            "hold_last_frame": False,
+            "hold_last_frame": False, "video_loop": False, "video_id": 0,
         }
         if not enabled:
             return
@@ -921,6 +926,8 @@ class ChatbotScreen:
             self._state["mode"] = "video"
             self._state["video_speed"] = max(speed, 0.01)
             self._state["hold_last_frame"] = bool(hold_last_frame)
+            self._state["video_loop"] = False
+            self._state["video_id"] += 1  # lets the page notice a NEW video even if the mode stayed "video"
         finished = self._video_ended.wait(timeout_s)
         if not finished:
             print(f"[screen] video did not report finishing within {timeout_s:.0f}s; continuing anyway.")
@@ -928,6 +935,22 @@ class ChatbotScreen:
             with self._state_lock:
                 self._state["mode"] = "chat"
         return finished
+
+    def play_loop(self, path: Path) -> bool:
+        """Starts a silent video looping full-screen and returns immediately
+        (it never "finishes" -- it plays until the show ends). The page loops
+        it natively, so there is no gap or flash at the loop point."""
+        if not self.available or not path.exists():
+            return False
+        self._video_path = path
+        with self._state_lock:
+            self._state["seq"] += 1
+            self._state["mode"] = "video"
+            self._state["video_speed"] = 1.0
+            self._state["hold_last_frame"] = False
+            self._state["video_loop"] = True
+            self._state["video_id"] += 1
+        return True
 
     def wait_for_space(self) -> None:
         """Blocks until the operator presses SPACE on the chatbot screen (the
@@ -1660,11 +1683,15 @@ def play_video_and_wait(screen: ChatbotScreen, video_path: Path | None, speed: f
     print(f"{ANSI['amber']}> Video finished.{ANSI['reset']}")
 
 
-def run_showcase(screen: ChatbotScreen, video_path: "Path | None", speed: float) -> None:
+def run_showcase(screen: ChatbotScreen, video_path: "Path | None", speed: float,
+                 loop_path: "Path | None" = None) -> None:
     """The closing beat: the robots are back under control and the show is on
     its last screen. When the operator presses SPACE (on the chatbot screen,
-    or ENTER here) the showcase video plays full-screen, and the screen then
-    stays on its last frame. Skipped if there's no screen or no video."""
+    or ENTER here) the showcase video plays full-screen. Afterwards the
+    screen loops the showcase's opening title scene (loop_path) until the
+    operator ends the show with ENTER here or Ctrl+C -- or, if there's no loop
+    file, simply stays on the showcase's last frame. Skipped if there's no
+    screen or no video."""
     if not screen.available:
         return
     if not video_path or not video_path.exists():
@@ -1675,7 +1702,22 @@ def run_showcase(screen: ChatbotScreen, video_path: "Path | None", speed: float)
     screen.wait_for_space()
     print(f"{ANSI['amber']}> Playing showcase video...{ANSI['reset']}")
     screen.play_video(video_path, speed=speed, hold_last_frame=True)
-    print(f"{ANSI['amber']}> Showcase finished — holding on its last frame.{ANSI['reset']}")
+    if loop_path and loop_path.exists() and screen.play_loop(loop_path):
+        print(f"{ANSI['amber']}> Showcase finished — looping the opening title screen "
+              f"({loop_path.name}).{ANSI['reset']}  Press ENTER here (or Ctrl+C) to end the show.")
+        try:
+            while _terminal_key_ready():
+                _consume_terminal_key()
+            with _TerminalRawMode():
+                while True:
+                    if _terminal_key_ready():
+                        _consume_terminal_key()
+                        break
+                    time.sleep(0.2)
+        except KeyboardInterrupt:
+            pass  # Ctrl+C is the expected way to end the loop -- not an error
+    else:
+        print(f"{ANSI['amber']}> Showcase finished — holding on its last frame.{ANSI['reset']}")
 
 
 def run_rogue_danger(danger: dict, voice: Voice, screen: ChatbotScreen) -> None:
@@ -1925,6 +1967,9 @@ def main() -> None:
     parser.add_argument("--showcase-video", default=None,
                         help="path to the closing showcase video played on SPACE at the end of the show "
                              "(default: ../Drone_Robotics_Hub_Showcase_5824x1248.mp4, or config.yaml's showcase_video)")
+    parser.add_argument("--showcase-loop-video", default=None,
+                        help="path to the silent video looped after the showcase until the show is ended "
+                             "(default: ../Drone_Robotics_Hub_Showcase_loop.mp4, or config.yaml's showcase_loop_video)")
     parser.add_argument("--no-showcase", action="store_true",
                         help="end the show at the final line, without waiting to play the closing showcase video")
     parser.add_argument("--no-intro", action="store_true",
@@ -1972,7 +2017,8 @@ def main() -> None:
         run_close(content.get("credits"), content["close"])
         if not args.no_showcase:
             showcase_path = resolve_video_path(args.showcase_video, cfg, "showcase_video", DEFAULT_SHOWCASE_VIDEO)
-            run_showcase(screen, showcase_path, args.speed)
+            loop_path = resolve_video_path(args.showcase_loop_video, cfg, "showcase_loop_video", DEFAULT_SHOWCASE_LOOP)
+            run_showcase(screen, showcase_path, args.speed, loop_path)
         print(f"\n{ANSI['cyan']}{ANSI['bold']}END OF SHOW{ANSI['reset']}\n")
     finally:
         screen.close()

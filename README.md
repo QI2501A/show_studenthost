@@ -57,10 +57,10 @@ Loops for the whole red "system has taken over" phase — starts the instant the
 
 ## The closing showcase video
 
-Once the robots are back under control and the show has reached its last screen (after the chatbot's final line and the credits), `Dialogue.py` holds there and waits. Press **SPACE** on the chatbot screen (or **ENTER** at the terminal) and **`../Drone_Robotics_Hub_Showcase_5824x1248.mp4`** (100s, 5824x1248) plays full-screen. When it ends the screen **stays on its last frame** (the Drone & Robotics Hub 2.0 end card) and `Dialogue.py` finishes; it does not switch back to the chatbot.
+Once the robots are back under control and the show has reached its last screen (after the chatbot's final line and the credits), `Dialogue.py` holds there and waits. Press **SPACE** on the chatbot screen (or **ENTER** at the terminal) and **`../Drone_Robotics_Hub_Showcase_5824x1248.mp4`** (100s, 5824x1248) plays full-screen. When it ends, the screen **loops the showcase's own opening title scene** ("DRONE & ROBOTICS HUB 2.0" — `../Drone_Robotics_Hub_Showcase_loop.mp4`, a silent, seamless 2.7s loop cut from 4.8–8.5s of the showcase, with its last second crossfaded into its first so the join is invisible) until you end the show with **ENTER at the terminal** or **Ctrl+C**. The loop fades in from black over 1.4s and repeats natively in the browser, so there's no flash at the loop point. It never switches back to the chatbot. If the loop file is missing, the screen instead stays on the showcase's last frame and `Dialogue.py` finishes. (`../Drone_Robotics_Hub_Showcase_loop.gif` is a small preview of the same loop; the show plays the MP4, which is sharper at wall resolution.)
 
 - A SPACE press from before the wait (e.g. the one that confirmed the last student line) is discarded, and the first 1.5s are ignored, so a double-press can't start it early.
-- Override the file with `showcase_video:` in `config.yaml` or `--showcase-video /path/to/file.mp4`. `--no-showcase` ends the show at the final line with no wait (rehearsals). With no screen, or if the file is missing, it's skipped with a notice.
+- Override the files with `showcase_video:` / `showcase_loop_video:` in `config.yaml` or `--showcase-video` / `--showcase-loop-video /path/to/file.mp4`. `--no-showcase` ends the show at the final line with no wait (rehearsals). With no screen, or if the file is missing, it's skipped with a notice.
 - `--speed` applies to it too.
 
 ## The welcome/intro page
