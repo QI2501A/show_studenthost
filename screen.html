@@ -1218,9 +1218,14 @@
       canvas.style.display = '';
     }
 
+    // The closing showcase holds on the video's last frame instead of
+    // switching back to the chatbot (state.hold_last_frame, set by
+    // Dialogue.py's play_video). A <video> that has ended simply keeps
+    // showing its final frame, so "hold" just means not calling exitVideoMode().
     videoEl.addEventListener('ended', () => {
       fetch('/video-ended', { method: 'POST' }).catch(() => {});
-      exitVideoMode();
+      if (!window._videoHold) exitVideoMode();
+      else overrideHint.style.display = 'none'; // a clean final frame: no operator hint in the corner
     });
 
     async function poll() {
@@ -1246,6 +1251,7 @@
 
         if (data.mode === 'video' && mode !== 'video') {
           window._videoSpeed = data.video_speed || 1;
+          window._videoHold = data.hold_last_frame === true;
           enterVideoMode();
         } else if (data.mode !== 'video' && mode === 'video') {
           exitVideoMode();

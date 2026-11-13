@@ -69,6 +69,9 @@ LEGACY_VIDEO = ROOT.parent / "DroneHub_Video.mp4"  # the previous cut -- only us
 # (see ChatbotScreen.run_intro). A self-contained animated canvas page.
 INTRO_PAGE = ROOT / "intro" / "drone_hub_welcome_ite.html"
 INTRO_FADE_S = 5.0  # seconds for the intro to crossfade into the digital rain
+# The closing showcase video: once the robots are back under control and the
+# show has reached its last screen, SPACE plays this (see run_showcase).
+DEFAULT_SHOWCASE_VIDEO = ROOT.parent / "Drone_Robotics_Hub_Showcase_5824x1248.mp4"
 # The rogue-phase "brain" video. The export in ../DH_Asset6_RobotRevolution.mp4 is
 # 3:08 but only its first 12.7s have picture (the rest is black and silent), so
 # the show plays a lossless trim of it instead; the original is left untouched.
@@ -192,7 +195,7 @@ def load_show_host_config() -> dict:
     hub_dashboard/config.yaml, which app.py owns)."""
     defaults = {
         "venue_lat": 1.3840, "venue_lon": 103.7470, "venue_tz": "Asia/Singapore",
-        "rise_video": None, "rogue_video": None, "rogue_music": None,
+        "rise_video": None, "rogue_video": None, "rogue_music": None, "showcase_video": None,
     }
     config_path = ROOT / "config.yaml"
     try:
@@ -784,6 +787,7 @@ class ChatbotScreen:
             "heard_seq": 0, "heard_segments": [],
             "override_feedback_seq": 0, "override_feedback_ok": True,
             "intro": "waiting" if self.intro_enabled else "off", "intro_fade_s": INTRO_FADE_S,
+            "hold_last_frame": False,
         }
         if not enabled:
             return
@@ -895,12 +899,15 @@ class ChatbotScreen:
                 self._state["heard_seq"] += 1
                 self._state["heard_segments"] = [text]
 
-    def play_video(self, path: Path, speed: float = 1.0, timeout_s: float = 900) -> bool:
+    def play_video(self, path: Path, speed: float = 1.0, timeout_s: float = 900,
+                   hold_last_frame: bool = False) -> bool:
         """Switches the screen to full-screen video playback and blocks until
         the browser reports the video has finished (screen.html POSTs
         /video-ended), or timeout_s elapses as a safety net so the show can
         never hang forever on a video that fails to play. Returns True if the
-        video actually finished normally."""
+        video actually finished normally. hold_last_frame: leave the screen
+        showing the video's final frame once it ends, instead of switching
+        back to the chatbot (used for the closing showcase)."""
         if not self.available:
             print("[screen] chatbot screen unavailable; cannot play the rise-phase video, skipping wait.")
             return False
@@ -913,12 +920,35 @@ class ChatbotScreen:
             self._state["seq"] += 1
             self._state["mode"] = "video"
             self._state["video_speed"] = max(speed, 0.01)
+            self._state["hold_last_frame"] = bool(hold_last_frame)
         finished = self._video_ended.wait(timeout_s)
         if not finished:
             print(f"[screen] video did not report finishing within {timeout_s:.0f}s; continuing anyway.")
-        with self._state_lock:
-            self._state["mode"] = "chat"
+        if not hold_last_frame:
+            with self._state_lock:
+                self._state["mode"] = "chat"
         return finished
+
+    def wait_for_space(self) -> None:
+        """Blocks until the operator presses SPACE on the chatbot screen (the
+        same /override signal that confirms a cue) or ENTER at the terminal.
+        Used for the closing showcase, where nothing else is waiting on that
+        key. Any press from before this call (e.g. the one that confirmed the
+        last student line) is discarded first, and the first moment is
+        ignored so a double-press can't start it by accident."""
+        self._manual_override.clear()
+        while _terminal_key_ready():
+            _consume_terminal_key()
+        time.sleep(1.5)
+        self._manual_override.clear()
+        with _TerminalRawMode():
+            while True:
+                if self.available and self.override_requested():
+                    return
+                if _terminal_key_ready():
+                    _consume_terminal_key()
+                    return
+                time.sleep(0.1)
 
     def set_theme(self, theme: str) -> None:
         """'green' (normal) or 'red' (system taken over) — recolours the
@@ -1630,6 +1660,24 @@ def play_video_and_wait(screen: ChatbotScreen, video_path: Path | None, speed: f
     print(f"{ANSI['amber']}> Video finished.{ANSI['reset']}")
 
 
+def run_showcase(screen: ChatbotScreen, video_path: "Path | None", speed: float) -> None:
+    """The closing beat: the robots are back under control and the show is on
+    its last screen. When the operator presses SPACE (on the chatbot screen,
+    or ENTER here) the showcase video plays full-screen, and the screen then
+    stays on its last frame. Skipped if there's no screen or no video."""
+    if not screen.available:
+        return
+    if not video_path or not video_path.exists():
+        print(f"[video] no showcase video found ({video_path}); skipping the closing showcase.")
+        return
+    print(f"\n{ANSI['amber']}> SHOWCASE READY ({video_path.name}).{ANSI['reset']}  "
+          f"Press SPACE on the chatbot screen (or ENTER here) to play it.")
+    screen.wait_for_space()
+    print(f"{ANSI['amber']}> Playing showcase video...{ANSI['reset']}")
+    screen.play_video(video_path, speed=speed, hold_last_frame=True)
+    print(f"{ANSI['amber']}> Showcase finished — holding on its last frame.{ANSI['reset']}")
+
+
 def run_rogue_danger(danger: dict, voice: Voice, screen: ChatbotScreen) -> None:
     """The system going rogue is unprompted by design (deck note: "Operator
     F4 — fires without a prompt cue. Feels spontaneous.") — so this fires
@@ -1874,6 +1922,11 @@ def main() -> None:
     parser.add_argument("--speed", type=float, default=1.0,
                          help="playback speed multiplier for the rise/rogue videos (>1 = faster; for rehearsal)")
     parser.add_argument("--no-screen", action="store_true", help="skip the Matrix-style chatbot browser screen")
+    parser.add_argument("--showcase-video", default=None,
+                        help="path to the closing showcase video played on SPACE at the end of the show "
+                             "(default: ../Drone_Robotics_Hub_Showcase_5824x1248.mp4, or config.yaml's showcase_video)")
+    parser.add_argument("--no-showcase", action="store_true",
+                        help="end the show at the final line, without waiting to play the closing showcase video")
     parser.add_argument("--no-intro", action="store_true",
                         help="skip the welcome/intro page and start the show immediately (for rehearsal)")
     parser.add_argument("--video", default=None,
@@ -1917,6 +1970,9 @@ def main() -> None:
         run_override(content["rogue"]["override"], hub, override_keyword, screen, voice)
         run_resolution(content["resolution"], voice, listener)
         run_close(content.get("credits"), content["close"])
+        if not args.no_showcase:
+            showcase_path = resolve_video_path(args.showcase_video, cfg, "showcase_video", DEFAULT_SHOWCASE_VIDEO)
+            run_showcase(screen, showcase_path, args.speed)
         print(f"\n{ANSI['cyan']}{ANSI['bold']}END OF SHOW{ANSI['reset']}\n")
     finally:
         screen.close()

@@ -24,6 +24,14 @@ venue_tz: Asia/Singapore
 # `python Dialogue.py --rogue-video /path/to/file.mp4`.
 # rogue_video: ../DH_Asset6_RobotRevolution_trim.mp4
 
+# The closing showcase: after the robots are back under control and the show
+# has reached its last screen, SPACE on the chatbot screen (or ENTER at the
+# terminal) plays this full-screen, and the screen then holds on its last
+# frame. Defaults to ../Drone_Robotics_Hub_Showcase_5824x1248.mp4 — override
+# here, or per-run with `python Dialogue.py --showcase-video /path/to/file.mp4`
+# (or skip it with --no-showcase).
+# showcase_video: ../Drone_Robotics_Hub_Showcase_5824x1248.mp4
+
 # Optional menacing background music, looped on the chatbot screen for the
 # whole red "system has taken over" phase — starts the instant the screen
 # turns red (the rogue "taking over" line) and stops the instant OVERRIDE is

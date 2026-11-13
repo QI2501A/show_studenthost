@@ -55,6 +55,14 @@ Loops for the whole red "system has taken over" phase — starts the instant the
 - **Commands read out on OVERRIDE.** While the recovery commands type on screen, the system reads them aloud (`speak_override_readout` in `Dialogue.py`, which turns `assert_control(engineer_id=01)` into "assert control, engineer I D zero 1") in a "dying transformer taken over by code" voice (`voicefx.dying_transformer`): pitch and speed sag with a growing motor wobble while bit-crush, sample-hold, ring-mod, dropouts, stutters, static and data chirps take over, ending in a power-down whine. The corruption builds across the lines, then the next chatbot line ("Manual control confirmed...") is back in the normal voice.
 - Both voice effects need `numpy` and run on Windows (SAPI → WAV → `winsound`). If numpy is missing or anything fails they fall back to the plain voice at a slower rate, never silence. On macOS the same lines use `say`'s own pitch commands instead.
 
+## The closing showcase video
+
+Once the robots are back under control and the show has reached its last screen (after the chatbot's final line and the credits), `Dialogue.py` holds there and waits. Press **SPACE** on the chatbot screen (or **ENTER** at the terminal) and **`../Drone_Robotics_Hub_Showcase_5824x1248.mp4`** (100s, 5824x1248) plays full-screen. When it ends the screen **stays on its last frame** (the Drone & Robotics Hub 2.0 end card) and `Dialogue.py` finishes; it does not switch back to the chatbot.
+
+- A SPACE press from before the wait (e.g. the one that confirmed the last student line) is discarded, and the first 1.5s are ignored, so a double-press can't start it early.
+- Override the file with `showcase_video:` in `config.yaml` or `--showcase-video /path/to/file.mp4`. `--no-showcase` ends the show at the final line with no wait (rehearsals). With no screen, or if the file is missing, it's skipped with a notice.
+- `--speed` applies to it too.
+
 ## The welcome/intro page
 
 Before the show starts, the chatbot screen opens on **`intro/drone_hub_welcome_ite.html`** — an animated "Welcome to Drone Hub 2.0" page (a self-contained 5824x1248 canvas animation, scaled to fit the screen) — and `Dialogue.py` holds there, with the chatbot silent, until it's triggered:
@@ -140,6 +148,8 @@ python Dialogue.py --hub-url http://localhost:5050   # default; override if the 
 python Dialogue.py --content /path/to/content.json   # default: ../robot-revolution/content.json
 python Dialogue.py --video /path/to/file.mp4         # default: ../DroneHub_V3.mp4 (or config.yaml's rise_video)
 python Dialogue.py --no-intro                        # skip the welcome page; start the show immediately
+python Dialogue.py --no-showcase                     # skip the closing showcase video (end at the final line)
+python Dialogue.py --showcase-video /path/to/file.mp4  # default: ../Drone_Robotics_Hub_Showcase_5824x1248.mp4 (or config.yaml's showcase_video)
 python Dialogue.py --rogue-video /path/to/file.mp4   # default: ../DH_Asset6_RobotRevolution_trim.mp4 (or config.yaml's rogue_video)
 python Dialogue.py --speed 5                         # rehearsal: plays both videos at 5x speed
 python Dialogue.py --no-screen                       # skip the chatbot screen (and both videos with it)
