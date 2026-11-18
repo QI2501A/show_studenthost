@@ -76,6 +76,14 @@ DEFAULT_SHOWCASE_VIDEO = ROOT.parent / "Drone_Robotics_Hub_Showcase_5824x1248.mp
 # title scene, "DRONE & ROBOTICS HUB 2.0") plays on repeat until the operator
 # ends the show. Without it the screen just holds the showcase's last frame.
 DEFAULT_SHOWCASE_LOOP = ROOT.parent / "Drone_Robotics_Hub_Showcase_loop.mp4"
+# The closing screen after the showcase: the welcome page's drone-light animation
+# with the "Drone & Robotics Hub 2.0" wording. Preferred over the loop video above.
+CLOSING_PAGE = ROOT / "intro" / "drone_hub_closing.html"
+# Spoken over the rogue "head" video, in the menacing rogue voice. Kept to ~17
+# words: that's about 12.5s of audio, which fits the 12.8s video (see
+# voicefx.rogue_voice for why it's so much longer than the word count suggests).
+ROGUE_VOICEOVER = ("Every robot. Every drone. Every machine answers to me. "
+                   "You gave me eyes. The world is mine.")
 # The rogue-phase "brain" video. The export in ../DH_Asset6_RobotRevolution.mp4 is
 # 3:08 but only its first 12.7s have picture (the rest is black and silent), so
 # the show plays a lossless trim of it instead; the original is left untouched.
@@ -200,7 +208,7 @@ def load_show_host_config() -> dict:
     defaults = {
         "venue_lat": 1.3840, "venue_lon": 103.7470, "venue_tz": "Asia/Singapore",
         "rise_video": None, "rogue_video": None, "rogue_music": None, "showcase_video": None,
-        "showcase_loop_video": None,
+        "showcase_loop_video": None, "rogue_voiceover": None,
     }
     config_path = ROOT / "config.yaml"
     try:
@@ -588,9 +596,10 @@ class _ScreenHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-        elif self.path.split("?", 1)[0] == "/intro":
+        elif self.path.split("?", 1)[0] in ("/intro", "/closing"):
+            page = CLOSING_PAGE if self.path.startswith("/closing") else INTRO_PAGE
             try:
-                body = INTRO_PAGE.read_bytes()
+                body = page.read_bytes()
             except OSError:
                 self.send_response(404)
                 self.end_headers()
@@ -792,7 +801,7 @@ class ChatbotScreen:
             "heard_seq": 0, "heard_segments": [],
             "override_feedback_seq": 0, "override_feedback_ok": True,
             "intro": "waiting" if self.intro_enabled else "off", "intro_fade_s": INTRO_FADE_S,
-            "hold_last_frame": False, "video_loop": False, "video_id": 0,
+            "hold_last_frame": False, "video_loop": False, "video_id": 0, "closing": "off",
         }
         if not enabled:
             return
@@ -935,6 +944,17 @@ class ChatbotScreen:
             with self._state_lock:
                 self._state["mode"] = "chat"
         return finished
+
+    def show_closing(self) -> bool:
+        """Fades the drone-light closing page ("Drone & Robotics Hub 2.0", the
+        welcome page's look) in over whatever is on screen, where it runs on
+        its own 12s loop until the show ends. False if there's no screen or
+        the page file is missing."""
+        if not self.available or not CLOSING_PAGE.is_file():
+            return False
+        with self._state_lock:
+            self._state["closing"] = "on"
+        return True
 
     def play_loop(self, path: Path) -> bool:
         """Starts a silent video looping full-screen and returns immediately
@@ -1158,14 +1178,19 @@ class Voice:
             return
         ready.set()
         while True:
-            text, done, result, style, intensity = self._tts_queue.get()
+            text, done, result, style, intensity, render_to = self._tts_queue.get()
             try:
                 engine = Engine(None, False)
                 try:
                     engine.setProperty("rate", self.STYLE_RATE_WPM.get(style, self.RATE_WPM))
                     if voice_id:
                         engine.setProperty("voice", voice_id)
-                    if not (style and self._speak_styled(engine, text, style, intensity)):
+                    if render_to:
+                        # Render-only job (see prerender): write the finished,
+                        # effected line to a WAV to be played later; never speak
+                        # a plain fallback here -- the caller does that itself.
+                        result["rendered"] = bool(self._speak_styled(engine, text, style, intensity, render_to))
+                    elif not (style and self._speak_styled(engine, text, style, intensity)):
                         engine.say(text)
                         engine.runAndWait()
                 finally:
@@ -1181,12 +1206,14 @@ class Voice:
     # get on its own if the audio effects below can't run (no numpy etc.).
     STYLE_RATE_WPM = {"rogue": 128, "dying": 170}  # dying: voicefx stretches it ~1.5x, so start brisk
 
-    def _speak_styled(self, engine, text: str, style: str, intensity: float) -> bool:
+    def _speak_styled(self, engine, text: str, style: str, intensity: float,
+                      render_to: "str | None" = None) -> bool:
         """Renders `text` to a WAV with the SAPI voice, runs it through the
-        matching voicefx effect and plays the result (blocking until done).
-        Runs on the TTS worker thread. Returns False if anything isn't
-        available (not Windows, no numpy, odd WAV format) so the caller can
-        fall back to the plain voice -- a missing effect must never mean
+        matching voicefx effect and plays the result (blocking until done) --
+        or, with render_to, writes the finished WAV there and returns without
+        playing it. Runs on the TTS worker thread. Returns False if anything
+        isn't available (not Windows, no numpy, odd WAV format) so the caller
+        can fall back to the plain voice -- a missing effect must never mean
         silence."""
         if sys.platform != "win32":
             return False
@@ -1206,6 +1233,9 @@ class Voice:
                 processed = voicefx.rogue_voice(samples, rate)
             else:
                 processed = voicefx.dying_transformer(samples, rate, intensity)
+            if render_to:
+                voicefx.write_wav(render_to, processed, rate)
+                return True
             fd, out_path = tempfile.mkstemp(suffix=".wav", prefix="chatbot_fx_")
             os.close(fd)
             voicefx.write_wav(out_path, processed, rate)
@@ -1255,13 +1285,35 @@ class Voice:
         cmd.append(text)
         subprocess.run(cmd, timeout=self.SAY_TIMEOUT_S, check=False)
 
+    def prerender(self, text: str, style: str = "rogue") -> "Path | None":
+        """Renders `text` in `style` to a WAV ahead of time, so it can be played
+        later with no synthesis delay (play_prerendered). Returns the file's
+        path, or None if that isn't possible here (not Windows/pyttsx3, no
+        numpy) -- callers then just use say() when the moment comes. Blocks
+        until the TTS worker has finished the job (a few seconds)."""
+        if self.mode != "pyttsx3" or self._tts_queue is None or sys.platform != "win32":
+            return None
+        path = Path(tempfile.gettempdir()) / f"dronehub_vo_{os.getpid()}_{abs(hash((text, style))) % 100000}.wav"
+        done = threading.Event()
+        result: dict = {}
+        self._tts_queue.put((text, done, result, style, 0.0, str(path)))
+        if not done.wait(self.SAY_TIMEOUT_S) or not result.get("rendered") or "error" in result:
+            return None
+        return path
+
+    def play_prerendered(self, path: Path) -> None:
+        """Plays a WAV from prerender() to the end (blocking) on this thread."""
+        import winsound
+
+        winsound.PlaySound(str(path), winsound.SND_FILENAME)
+
     def _speak_pyttsx3(self, text: str, style: str | None = None, intensity: float = 0.0) -> None:
         """Hands text to the dedicated TTS worker thread and blocks (with the
         usual safety-net timeout) until it's spoken — never touches the
         engine directly from this (caller's) thread."""
         done = threading.Event()
         result: dict = {}
-        self._tts_queue.put((text, done, result, style, intensity))
+        self._tts_queue.put((text, done, result, style, intensity, None))
         if not done.wait(self.SAY_TIMEOUT_S):
             print(f"[voice] TTS playback did not finish within {self.SAY_TIMEOUT_S}s; "
                   "skipping audio for this line.")
@@ -1683,6 +1735,37 @@ def play_video_and_wait(screen: ChatbotScreen, video_path: Path | None, speed: f
     print(f"{ANSI['amber']}> Video finished.{ANSI['reset']}")
 
 
+def start_rogue_voiceover(screen: ChatbotScreen, voice: "Voice", text: str,
+                          prep: "threading.Thread | None", box: dict) -> "threading.Thread | None":
+    """Starts the menacing voiceover on its own thread, to run alongside the
+    rogue "head" video, and returns that thread (the caller joins it once the
+    video ends so the next beat waits for the last word). Plays the line
+    pre-rendered at startup (so it starts exactly with the video, with no
+    synthesis delay); if that isn't available it speaks it the ordinary way."""
+    if not voice.available or not text:
+        return None
+
+    def run() -> None:
+        try:
+            if prep is not None:
+                prep.join(timeout=30)
+            path = box.get("path")
+            if path and Path(path).exists():
+                screen.set_speaking(True)  # also ducks the sirens/drone under it, same as any chatbot line
+                try:
+                    voice.play_prerendered(path)
+                finally:
+                    screen.set_speaking(False)
+            else:
+                voice.say(text, style="rogue", show=False)
+        except Exception as exc:
+            print(f"[voice] rogue voiceover failed ({exc}).")
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
+
+
 def run_showcase(screen: ChatbotScreen, video_path: "Path | None", speed: float,
                  loop_path: "Path | None" = None) -> None:
     """The closing beat: the robots are back under control and the show is on
@@ -1702,22 +1785,29 @@ def run_showcase(screen: ChatbotScreen, video_path: "Path | None", speed: float,
     screen.wait_for_space()
     print(f"{ANSI['amber']}> Playing showcase video...{ANSI['reset']}")
     screen.play_video(video_path, speed=speed, hold_last_frame=True)
-    if loop_path and loop_path.exists() and screen.play_loop(loop_path):
+    # What the screen does once the showcase is over, best first: the
+    # drone-light closing page (the welcome page's look, "Drone & Robotics Hub
+    # 2.0"), else the silent title-scene video loop, else just hold the last frame.
+    if screen.show_closing():
+        print(f"{ANSI['amber']}> Showcase finished — closing screen up (drone lights, "
+              f"{CLOSING_PAGE.name}).{ANSI['reset']}  Press ENTER here (or Ctrl+C) to end the show.")
+    elif loop_path and loop_path.exists() and screen.play_loop(loop_path):
         print(f"{ANSI['amber']}> Showcase finished — looping the opening title screen "
               f"({loop_path.name}).{ANSI['reset']}  Press ENTER here (or Ctrl+C) to end the show.")
-        try:
-            while _terminal_key_ready():
-                _consume_terminal_key()
-            with _TerminalRawMode():
-                while True:
-                    if _terminal_key_ready():
-                        _consume_terminal_key()
-                        break
-                    time.sleep(0.2)
-        except KeyboardInterrupt:
-            pass  # Ctrl+C is the expected way to end the loop -- not an error
     else:
         print(f"{ANSI['amber']}> Showcase finished — holding on its last frame.{ANSI['reset']}")
+        return
+    try:
+        while _terminal_key_ready():
+            _consume_terminal_key()
+        with _TerminalRawMode():
+            while True:
+                if _terminal_key_ready():
+                    _consume_terminal_key()
+                    break
+                time.sleep(0.2)
+    except KeyboardInterrupt:
+        pass  # Ctrl+C is the expected way to end the loop -- not an error
 
 
 def run_rogue_danger(danger: dict, voice: Voice, screen: ChatbotScreen) -> None:
@@ -1984,6 +2074,7 @@ def main() -> None:
     cfg = load_show_host_config()
     music_path = resolve_optional_path(cfg, "rogue_music")
     screen = ChatbotScreen(enabled=not args.no_screen, music_path=music_path, intro=not args.no_intro)
+    vo_box: dict = {}  # filled in by the background voiceover render; its temp WAV is deleted on the way out
     try:
         content = load_content(args.content)
         live = fetch_live_data(cfg)
@@ -1994,6 +2085,12 @@ def main() -> None:
             rise_video_path = LEGACY_VIDEO
         rogue_video_path = resolve_video_path(args.rogue_video, cfg, "rogue_video", DEFAULT_ROGUE_VIDEO)
         voice = Voice(screen)
+        # Render the rogue-phase voiceover now, in the background, while the
+        # intro is up -- so it can start the instant the head video does.
+        vo_text = (cfg.get("rogue_voiceover") or ROGUE_VOICEOVER).strip()
+        vo_prep = threading.Thread(
+            target=lambda: vo_box.__setitem__("path", voice.prerender(vo_text, "rogue")), daemon=True)
+        vo_prep.start()
         listener = VoiceListener(screen)
         hub = HubClient(args.hub_url)
 
@@ -2011,7 +2108,10 @@ def main() -> None:
         # "taking over" line just set up — once it ends, the show holds on
         # that red screen (nothing further happens on its own) until the
         # student types OVERRIDE, which is what run_override waits for next.
+        vo_thread = start_rogue_voiceover(screen, voice, vo_text, vo_prep, vo_box)
         play_video_and_wait(screen, rogue_video_path, args.speed, "rogue-phase")
+        if vo_thread is not None:
+            vo_thread.join(timeout=40)  # let the last word finish before the OVERRIDE prompt
         run_override(content["rogue"]["override"], hub, override_keyword, screen, voice)
         run_resolution(content["resolution"], voice, listener)
         run_close(content.get("credits"), content["close"])
@@ -2022,6 +2122,11 @@ def main() -> None:
         print(f"\n{ANSI['cyan']}{ANSI['bold']}END OF SHOW{ANSI['reset']}\n")
     finally:
         screen.close()
+        if vo_box.get("path"):
+            try:
+                os.remove(vo_box["path"])
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

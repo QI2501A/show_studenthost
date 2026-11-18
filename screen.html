@@ -210,6 +210,28 @@
     background: #000;
     pointer-events: none;
   }
+  /* Closing screen: the drone-light "Drone & Robotics Hub 2.0" page, faded in
+     over the showcase's last frame and left running (its animation loops every
+     12s) until the show is ended. */
+  #closingOverlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 1001;
+    background: #000;
+    opacity: 0;
+    transition: opacity 1.8s ease-in-out;
+  }
+  #closingOverlay.show { opacity: 1; }
+  #closingFrame {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: #000;
+    pointer-events: none;
+  }
   #startOverlay {
     position: fixed;
     inset: 0;
@@ -342,6 +364,7 @@
        page is configured. tabindex=-1 + pointer-events:none keep keyboard
        focus on THIS page: the intro page pauses itself on SPACE. -->
   <div id="introOverlay" aria-hidden="true"><iframe id="introFrame" tabindex="-1" title="Welcome"></iframe></div>
+  <div id="closingOverlay" aria-hidden="true"><iframe id="closingFrame" tabindex="-1" title="Closing"></iframe></div>
   <audio id="rogueMusic" loop preload="none"></audio>
 
   <div id="startOverlay"><div class="msg">&gt; CLICK TO ACTIVATE SYSTEM CHANNEL<br>(enters full-screen)</div></div>
@@ -432,6 +455,32 @@
       void introOverlay.offsetWidth;           // commit opacity:1 first so the transition actually runs
       introOverlay.classList.add('fading');
       setTimeout(finishIntro, introFadeMs + 200);
+    }
+
+    // --- Closing screen (Dialogue.py's show_closing) ---
+    // Loads the drone-light page, waits until its animation is actually
+    // running (so we fade in on drones, not on a blank frame), then fades it
+    // in over the showcase's last frame. The page's iframe never gets focus.
+    let closingPhase = 'off';
+    function showClosing() {
+      if (closingPhase !== 'off') return;
+      closingPhase = 'loading';
+      const overlay = document.getElementById('closingOverlay');
+      const frame = document.getElementById('closingFrame');
+      overlay.style.display = 'block';
+      frame.src = '/closing';
+      const started = performance.now();
+      const wait = setInterval(() => {
+        let ready = false;
+        try { ready = !!(frame.contentWindow && frame.contentWindow.__ready); } catch (e) {}
+        if (ready || performance.now() - started > 6000) {
+          clearInterval(wait);
+          closingPhase = 'shown';
+          void overlay.offsetWidth;
+          overlay.classList.add('show');
+          try { window.focus(); } catch (e) {}
+        }
+      }, 100);
     }
 
     document.addEventListener('keydown', (e) => {
@@ -559,7 +608,12 @@
         const master = synthCtx.createGain();
         master.gain.setValueAtTime(0, now);
         master.gain.linearRampToValueAtTime(0.3, now + 1.5);
-        master.connect(synthCtx.destination);
+        // A separate duck stage after the fade-in envelope, so the voice can
+        // push the drone down without fighting the master's own ramp.
+        const duck = synthCtx.createGain();
+        duck.gain.value = 1;
+        master.connect(duck);
+        duck.connect(synthCtx.destination);
 
         const drone = synthCtx.createOscillator();
         drone.type = 'sawtooth';
@@ -586,7 +640,7 @@
           pulseGain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
         }, 700);
 
-        synthNodes = { master, drone, pulseOsc, pulseTimer };
+        synthNodes = { master, duck, drone, pulseOsc, pulseTimer };
       } catch (e) {
         // Web Audio unsupported/blocked -- show still runs silently
       }
@@ -635,7 +689,7 @@
     // while it speaks they drop to ~12% (about -18 dB), and they stay down for
     // a beat after each sentence so they don't swell back between words. A
     // video's own soundtrack gets a gentler duck.
-    const SIREN_DUCK_SPEECH = 0.12;
+    const SIREN_DUCK_SPEECH = 0.04; // about -28 dB (was 0.12, -18 dB: still masked the voice); the drone/music duck with it
     const SIREN_DUCK_VIDEO = 0.3;
     let sirenDuckUntil = 0;
     let sirenVideoDuck = false;
@@ -845,7 +899,11 @@
           const intensity = Math.min(1, (t - startedAt) / 6);
           const level = SIREN_LEVEL * (0.7 + 0.3 * intensity);
           master.gain.setTargetAtTime(t < dropUntil ? level * 0.04 : level, t, t < dropUntil ? 0.01 : 0.03);
-          out.gain.setTargetAtTime(currentSirenDuck(), t, 0.04); // voice ducking, after the distortion
+          const duckNow = currentSirenDuck();
+          out.gain.setTargetAtTime(duckNow, t, 0.04); // voice ducking, after the distortion
+          // The drone / music track are background too: duck them with the sirens.
+          if (synthCtx && synthNodes && synthNodes.duck) synthNodes.duck.gain.setTargetAtTime(duckNow, synthCtx.currentTime, 0.05);
+          if (hasMusicFile) rogueMusicEl.volume = 0.5 * duckNow;
           while (twoToneNext < t + 0.6) {
             twoTone.frequency.setValueAtTime(twoToneHigh ? 960 : 770, twoToneNext);
             twoToneHigh = !twoToneHigh;
@@ -1252,6 +1310,7 @@
         const data = await res.json();
         if (typeof data.intro_fade_s === 'number' && data.intro_fade_s > 0) introFadeMs = data.intro_fade_s * 1000;
         if (data.intro === 'go') startIntro(); // started from somewhere other than this page (terminal ENTER, a future trigger)
+        if (data.closing === 'on') showClosing();
         if (typeof data.rate_wpm === 'number' && data.rate_wpm > 0) rateWpm = data.rate_wpm;
         if (typeof data.has_music_file === 'boolean') hasMusicFile = data.has_music_file;
         if (typeof data.speaking === 'boolean' && window.__skullHead) window.__skullHead.setSpeaking(data.speaking);

@@ -24,6 +24,12 @@ venue_tz: Asia/Singapore
 # `python Dialogue.py --rogue-video /path/to/file.mp4`.
 # rogue_video: ../DH_Asset6_RobotRevolution_trim.mp4
 
+# Spoken in the menacing rogue voice over the rogue "head" video (it starts with
+# the video; the show waits for the last word). Keep it to about 17 words: that
+# is ~12.5s of audio, which just fits the 12.8s video. Defaults to the line in
+# Dialogue.py (ROGUE_VOICEOVER) if this key is absent.
+# rogue_voiceover: "Every robot. Every drone. Every machine answers to me. You gave me eyes. The world is mine."
+
 # The closing showcase: after the robots are back under control and the show
 # has reached its last screen, SPACE on the chatbot screen (or ENTER at the
 # terminal) plays this full-screen, and the screen then holds on its last

@@ -134,6 +134,38 @@ def _stutter(y: np.ndarray, sr: int, rng: np.random.Generator, count: int,
     return y
 
 
+def loud_and_proud(y: np.ndarray, sr: int, target_rms_db: float = -7.5, ceiling: float = 0.97) -> np.ndarray:
+    """Makes a voice much denser/louder without clipping: a block compressor
+    (ratio 8, threshold -23 dBFS, fast attack, ~65ms release) evens out the
+    peaks, make-up gain brings the speech to `target_rms_db` (before the
+    limiter, which trims a couple of dB off), and a tanh soft limiter keeps
+    the rest under `ceiling`. Used where the voice has to win
+    over sirens -- a voice that only peaks high but averages -16 dBFS (the
+    plain effect chain's output) gets buried by anything dense."""
+    n = y.size
+    if n < 64:
+        return y
+    blk = max(1, int(sr * 0.01))
+    nb = -(-n // blk)
+    mag = np.zeros(nb * blk, dtype=np.float32)
+    mag[:n] = np.abs(y)
+    env = mag.reshape(nb, blk).max(axis=1)
+    smooth = env.copy()
+    for i in range(1, nb):                                   # instant attack, slow release
+        smooth[i] = max(env[i], smooth[i - 1] * 0.85)
+    thresh, ratio = 0.07, 8.0
+    gain = np.ones(nb, dtype=np.float32)
+    over = smooth > thresh
+    gain[over] = (thresh / smooth[over]) ** (1.0 - 1.0 / ratio)
+    g = np.interp(np.arange(n), (np.arange(nb) + 0.5) * blk, gain).astype(np.float32)
+    y = y * g
+    voiced = y[np.abs(y) > 0.02]
+    rms = float(np.sqrt(np.mean(voiced ** 2))) if voiced.size else 0.0
+    if rms > 1e-6:
+        y = y * (10.0 ** (target_rms_db / 20.0) / rms)
+    return (ceiling * np.tanh(y / ceiling)).astype(np.float32)
+
+
 # --------------------------------------------------------------------------- the effects
 
 def rogue_voice(x: np.ndarray, sr: int, seed=None) -> np.ndarray:
@@ -149,7 +181,9 @@ def rogue_voice(x: np.ndarray, sr: int, seed=None) -> np.ndarray:
     y = _stutter(y, sr, rng, count=3)
     y = np.tanh(2.6 * _normalise(y, 0.85))          # drive into soft clipping
     y = _echo(y, sr, [(0.11, 0.36), (0.24, 0.22), (0.41, 0.12)])
-    return _normalise(y).astype(np.float32)
+    # Compress + limit to a much higher average level (about -9 dBFS of speech,
+    # from ~-16) so it stays on top of the sirens and drone beneath it.
+    return loud_and_proud(y, sr).astype(np.float32)
 
 
 def dying_transformer(x: np.ndarray, sr: int, intensity: float = 0.5, seed=None) -> np.ndarray:
