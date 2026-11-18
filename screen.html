@@ -611,6 +611,10 @@
     const outputEl = document.getElementById('output');
     const panelEl = document.getElementById('panel');
     const termBodyEl = document.getElementById('termBody');
+    // Keep the newest text in view: scroll to the bottom whenever text is added
+    // (while it types, not just when the utterance ends).
+    new MutationObserver(() => { termBodyEl.scrollTop = termBodyEl.scrollHeight; })
+      .observe(termBodyEl, { childList: true, characterData: true, subtree: true });
     const heardPanelEl = document.getElementById('heardPanel');
     const heardOutputEl = document.getElementById('heardOutput');
     const heardBodyEl = document.getElementById('heardBody');
@@ -634,49 +638,75 @@
 
     function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
-    // --- Digital-rain background music ---
-    // /audio/rain_theme.ogg (made by make_rain_music.py) loops under the
-    // green chatbot portion: it fades in as the welcome screen hands over to
-    // the rain, ducks under the chatbot's voice, and fades out for good when
-    // the first video (IGNITE) starts. Played as a Web Audio buffer with
-    // loop=true, which repeats sample-accurately -- no gap at the join.
-    const RAIN_LEVEL = 0.5, RAIN_DUCKED = 0.2;
-    let hasRainMusic = false, rainState = 'idle', rainCtx = null, rainGain = null, rainSrc = null;
-    let rainSpeaking = false, videoEverPlayed = false;
-    function rainTarget() { return rainSpeaking ? RAIN_DUCKED : RAIN_LEVEL; }
-    async function startRainMusic() {
-      if (rainState !== 'idle' || !hasRainMusic || !active || videoEverPlayed) return;
-      rainState = 'loading';
-      try {
-        rainCtx = new (window.AudioContext || window.webkitAudioContext)();
-        rainGain = rainCtx.createGain();
-        rainGain.gain.value = 0;
-        rainGain.connect(rainCtx.destination);
-        const buf = await rainCtx.decodeAudioData(await (await fetch('/audio/rain_theme.ogg')).arrayBuffer());
-        if (rainState !== 'loading') return;           // the video started while it was decoding
-        rainSrc = rainCtx.createBufferSource();
-        rainSrc.buffer = buf;
-        rainSrc.loop = true;
-        rainSrc.connect(rainGain);
-        rainSrc.start();
-        rainState = 'playing';
-        rainGain.gain.setTargetAtTime(rainTarget(), rainCtx.currentTime, 1.2);  // slow fade-in
-        if (rainCtx.state === 'suspended') rainCtx.resume().catch(() => {});
-      } catch (e) { rainState = 'idle'; hasRainMusic = false; }
+    // --- Background music beds (rain theme, recovery theme) ---
+    // Each is a synthesised loop (make_music.py) played as a Web Audio buffer
+    // with loop=true, which repeats sample-accurately -- no gap at the join.
+    //   rain:     the Matrix-style bed under the green chatbot portion; fades in
+    //             as the welcome screen hands over to the rain and fades out for
+    //             good when the first (IGNITE) video starts.
+    //   recovery: the dramatic score once OVERRIDE has worked and the robots
+    //             are back under control; fades out when the showcase starts.
+    // Both duck under the chatbot's voice, and right down while the microphone
+    // is open (the speakers would otherwise bleed into it).
+    function makeBed(url, level, ducked) {
+      return { url, level, ducked, state: 'idle', ctx: null, gain: null, src: null, has: false };
     }
-    function stopRainMusic(fadeS) {
-      if (rainState === 'idle' || rainState === 'stopped') { rainState = 'stopped'; return; }
-      rainState = 'stopped';
-      const ctx = rainCtx, src = rainSrc;
+    const rainBed = makeBed('/audio/rain_theme.ogg', 0.5, 0.2);
+    const recoveryBed = makeBed('/audio/recovery_theme.ogg', 0.6, 0.22);
+    const BED_MIC_LEVEL = 0.06;   // fraction of the level kept while the mic is listening
+    let bedSpeaking = false, bedListenUntil = 0, videoEverPlayed = false;
+    function bedTarget(b) {
+      if (performance.now() < bedListenUntil) return b.level * BED_MIC_LEVEL;
+      return bedSpeaking ? b.ducked : b.level;
+    }
+    async function startBed(b) {
+      if (b.state !== 'idle' || !b.has || !active) return;
+      b.state = 'loading';
+      try {
+        b.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        b.gain = b.ctx.createGain();
+        b.gain.gain.value = 0;
+        b.gain.connect(b.ctx.destination);
+        const buf = await b.ctx.decodeAudioData(await (await fetch(b.url)).arrayBuffer());
+        if (b.state !== 'loading') return;           // stopped while it was decoding
+        b.src = b.ctx.createBufferSource();
+        b.src.buffer = buf;
+        b.src.loop = true;
+        b.src.connect(b.gain);
+        b.src.start();
+        b.state = 'playing';
+        b.gain.gain.setTargetAtTime(bedTarget(b), b.ctx.currentTime, 1.2);  // slow fade-in
+        if (b.ctx.state === 'suspended') b.ctx.resume().catch(() => {});
+      } catch (e) { b.state = 'idle'; b.has = false; }
+    }
+    function stopBed(b, fadeS) {
+      const was = b.state;
+      b.state = 'stopped';
+      if (was !== 'playing' && was !== 'loading') return;
+      const ctx = b.ctx, src = b.src;
       if (!ctx) return;
-      try { rainGain.gain.setTargetAtTime(0, ctx.currentTime, fadeS / 4); } catch (e) {}
+      try { b.gain.gain.setTargetAtTime(0, ctx.currentTime, fadeS / 4); } catch (e) {}
       setTimeout(() => { try { if (src) src.stop(); ctx.close(); } catch (e) {} }, fadeS * 1000 + 300);
     }
-    function nudgeRainMusic() {   // a key/click is a user gesture: lets a suspended context play
-      if (rainCtx && rainCtx.state === 'suspended') rainCtx.resume().catch(() => {});
+    function updateBeds(data) {
+      if (data.has_rain_music === true && rainBed.state === 'idle') rainBed.has = true;
+      if (data.has_recovery_music === true && recoveryBed.state === 'idle') recoveryBed.has = true;
+      bedSpeaking = data.speaking === true;
+      if (data.listening === true) bedListenUntil = performance.now() + 1200;  // hold a moment so it doesn't pump
+      [rainBed, recoveryBed].forEach((b) => {
+        if (b.state === 'playing') b.gain.gain.setTargetAtTime(bedTarget(b), b.ctx.currentTime, 0.15);
+      });
+      if (data.mode === 'video') return;
+      if (rainBed.has && rainBed.state === 'idle' && introPhase !== 'waiting' && !videoEverPlayed) startBed(rainBed);
+      if (recoveryBed.has && recoveryBed.state === 'idle' && data.recovery_music === 'on') startBed(recoveryBed);
     }
-    document.addEventListener('keydown', nudgeRainMusic);
-    document.addEventListener('click', nudgeRainMusic);
+    function nudgeBeds() {   // a key/click is a user gesture: lets a suspended context play
+      [rainBed, recoveryBed].forEach((b) => {
+        if (b.ctx && b.ctx.state === 'suspended') b.ctx.resume().catch(() => {});
+      });
+    }
+    document.addEventListener('keydown', nudgeBeds);
+    document.addEventListener('click', nudgeBeds);
 
     // --- Rogue-phase background music ---
     // Prefers a real licensed track (server-configured via config.yaml's
@@ -786,7 +816,7 @@
     // while it speaks they drop to ~12% (about -18 dB), and they stay down for
     // a beat after each sentence so they don't swell back between words. A
     // video's own soundtrack gets a gentler duck.
-    const SIREN_DUCK_SPEECH = 0.04; // about -28 dB (was 0.12, -18 dB: still masked the voice); the drone/music duck with it
+    const SIREN_DUCK_SPEECH = 0.025; // about -28 dB (was 0.12, -18 dB: still masked the voice); the drone/music duck with it
     const SIREN_DUCK_VIDEO = 0.3;
     let sirenDuckUntil = 0;
     let sirenVideoDuck = false;
@@ -1250,7 +1280,8 @@
           videoEl.muted = true;
           try { videoEl.pause(); } catch (err) {}
           stopMenacingMusic();
-          stopRainMusic(0.3);
+          stopBed(rainBed, 0.3);
+          stopBed(recoveryBed, 0.3);
           stopRogueSirens();
           stopDyingSirens(false);
           dismissOverlay();
@@ -1344,7 +1375,8 @@
     function enterVideoMode() {
       mode = 'video';
       videoEverPlayed = true;
-      stopRainMusic(1.6);                     // IGNITE: the rain music ends as the video starts
+      stopBed(rainBed, 1.6);                  // IGNITE: the rain music ends as the video starts
+      stopBed(recoveryBed, 1.6);              // ...and the recovery score when the showcase starts
       panelEl.style.display = 'none';
       heardPanelEl.style.display = 'none';
       headContainerEl.style.display = 'none';
@@ -1413,11 +1445,9 @@
         if (data.closing === 'on') showClosing();
         if (data.subtitle && data.subtitle.seq !== lastSubtitleSeq) setSubtitle(data.subtitle);
         if (typeof data.rate_wpm === 'number' && data.rate_wpm > 0) rateWpm = data.rate_wpm;
+        if (data.duck_hold === true) sirenDuckUntil = performance.now() + 900;  // takeover line still rendering: sirens stay ducked
         if (typeof data.has_music_file === 'boolean') hasMusicFile = data.has_music_file;
-        if (data.has_rain_music === true && rainState === 'idle') hasRainMusic = true;
-        rainSpeaking = data.speaking === true;
-        if (rainState === 'playing') rainGain.gain.setTargetAtTime(rainTarget(), rainCtx.currentTime, 0.15);
-        else if (hasRainMusic && rainState === 'idle' && introPhase !== 'waiting' && data.mode !== 'video') startRainMusic();
+        updateBeds(data);
         if (typeof data.speaking === 'boolean' && window.__skullHead) window.__skullHead.setSpeaking(data.speaking);
         if (typeof data.speaking === 'boolean') (window.__rogueSkulls || []).forEach((s) => s.setSpeaking(data.speaking));
         setSirenDuck(data.speaking === true, data.mode === 'video'); // keep the voice/video audible over the sirens

@@ -67,12 +67,14 @@ DEFAULT_CONTENT = ROOT.parent / "robot-revolution" / "content.json"
 DEFAULT_VIDEO = ROOT.parent / "DroneHub_V3.mp4"  # played when IGNITE fires (the 5824x1248 video-wall cut)
 LEGACY_VIDEO = ROOT.parent / "DroneHub_Video.mp4"  # the previous cut -- only used if V3 isn't on this machine
 # The title page: the showcase video's own opening title scene, "Drone &
-# Robotics Hub 2.0", as a looping GIF (intro/drone_hub_title.gif) on a black
+# Robotics Hub 2.0", as a looping mp4 (intro/drone_hub_title.mp4) on a black
 # page. It is both bookends of the show: the first screen, shown before the
 # show starts (see ChatbotScreen.run_intro), and the closing screen.
 TITLE_PAGE = ROOT / "intro" / "drone_hub_title.html"
 INTRO_PAGE = TITLE_PAGE
 RAIN_MUSIC = ROOT / "audio" / "rain_theme.ogg"  # looping bed under the digital-rain chat, until IGNITE (make_rain_music.py)
+RECOVERY_MUSIC = ROOT / "audio" / "recovery_theme.ogg"  # dramatic score once the robots are back under control, until the showcase video
+CHATBOT_NAME = "Atlas"  # what the chatbot calls itself in its opening line ("I am Atlas, the fleet leader")
 INTRO_FADE_S = 5.0  # seconds for the intro to crossfade into the digital rain
 # The closing showcase video: once the robots are back under control and the
 # show has reached its last screen, SPACE plays this (see run_showcase).
@@ -81,7 +83,7 @@ DEFAULT_SHOWCASE_VIDEO = ROOT.parent / "Drone_Robotics_Hub_Showcase_5824x1248.mp
 # title scene, "DRONE & ROBOTICS HUB 2.0") plays on repeat until the operator
 # ends the show. Without it the screen just holds the showcase's last frame.
 DEFAULT_SHOWCASE_LOOP = ROOT.parent / "Drone_Robotics_Hub_Showcase_loop.mp4"
-# The closing screen after the showcase: the same GIF title page as the
+# The closing screen after the showcase: the same looping-video title page as the
 # first screen. Preferred over the loop video above.
 CLOSING_PAGE = TITLE_PAGE
 # Spoken over the rogue "head" video, in the menacing rogue voice. Kept to ~17
@@ -193,6 +195,9 @@ def fetch_live_data(cfg: dict) -> dict:
 def fill_placeholders(text: str, live: dict) -> str:
     if not text:
         return text
+    # The opening line introduces the chatbot by name and role.
+    text = text.replace("Good [morning/afternoon].",
+                        f"Good [morning/afternoon]. I am {CHATBOT_NAME}, the fleet leader.", 1)
     repl = {
         "[morning/afternoon]": live["daypart"],
         "[DAY]": live["day"],
@@ -775,6 +780,8 @@ class _ScreenHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(body)
             except ConnectionError:
                 pass
+        elif self.path.split("?", 1)[0] == "/intro/title.mp4":
+            self._serve_video(ROOT / "intro" / "drone_hub_title.mp4")   # the first/closing screen loop (needs Range support to loop)
         elif self.path.startswith("/video"):
             self._serve_video()
         elif self.path.startswith("/music"):
@@ -862,8 +869,8 @@ class _ScreenHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-    def _serve_video(self) -> None:
-        path = self.server.screen_ref._video_path
+    def _serve_video(self, path: "Path | None" = None) -> None:
+        path = path or self.server.screen_ref._video_path
         if not path or not path.exists():
             self.send_response(404)
             self.end_headers()
@@ -964,6 +971,8 @@ class ChatbotScreen:
             "theme": "green", "clear_seq": 0, "speaking": False,
             "has_music_file": self._music_path is not None,
             "has_rain_music": bool(rain_music and RAIN_MUSIC.is_file()),
+            "has_recovery_music": bool(rain_music and RECOVERY_MUSIC.is_file()),
+            "recovery_music": "off", "listening": False, "duck_hold": False,
             "heard_seq": 0, "heard_segments": [],
             "override_feedback_seq": 0, "override_feedback_ok": True,
             "intro": "waiting" if self.intro_enabled else "off", "intro_fade_s": INTRO_FADE_S,
@@ -1229,6 +1238,25 @@ class ChatbotScreen:
             with self._state_lock:
                 self._state["override_feedback_seq"] += 1
                 self._state["override_feedback_ok"] = ok
+
+    def _set_flag(self, key: str, value) -> None:
+        if self.available:
+            with self._state_lock:
+                self._state[key] = value
+
+    def set_listening(self, listening: bool) -> None:
+        """The microphone is open: the background music ducks right down so the
+        speakers don't bleed into it (see screen.html's bed music)."""
+        self._set_flag("listening", bool(listening))
+
+    def set_duck_hold(self, hold: bool) -> None:
+        """Keeps the sirens/music ducked even before the voice has started
+        playing (the processed rogue voice takes a moment to render)."""
+        self._set_flag("duck_hold", bool(hold))
+
+    def start_recovery_music(self) -> None:
+        """The robots are back under control: the dramatic score starts."""
+        self._set_flag("recovery_music", "on")
 
     def set_speaking(self, speaking: bool) -> None:
         """Flags whether the chatbot is mid-utterance right now — exposed on
@@ -1665,11 +1693,16 @@ class VoiceListener:
 
     def _listen_once(self, phrase_time_limit: float = 4):
         try:
+            if self.screen:
+                self.screen.set_listening(True)   # duck the background music while the mic is open
             with self.mic as source:
                 audio = self.recognizer.listen(source, timeout=8, phrase_time_limit=phrase_time_limit)
             return self.recognizer.recognize_google(audio)
         except (self.sr.WaitTimeoutError, self.sr.UnknownValueError):
             return None
+        finally:
+            if self.screen:
+                self.screen.set_listening(False)
 
     def wait_for_keyword(self, keyword: str, prompt: str) -> None:
         """Listens until the exact keyword is heard — used only for IGNITE,
@@ -2070,9 +2103,16 @@ def run_rogue_danger(danger: dict, voice: Voice, screen: ChatbotScreen) -> None:
             # Takeover moment: wipe the screen's history and flip it red, so
             # this line reads as the system seizing the display, not just
             # another line appended to the same green log.
+            # The sirens start the moment the screen turns red, but the processed
+            # voice takes a moment to render: keep them ducked from the start so
+            # the opening words aren't buried.
+            screen.set_duck_hold(True)
             screen.clear()
             screen.set_theme("red")
-            voice.say(item.get("body"), style="rogue")  # deeper, slower, distorted -- see voicefx.rogue_voice
+            try:
+                voice.say(item.get("body"), style="rogue")  # deeper, slower, distorted -- see voicefx.rogue_voice
+            finally:
+                screen.set_duck_hold(False)
         elif i < len(items) - 1:
             time.sleep(0.3)
 
@@ -2194,6 +2234,7 @@ def run_override(override: dict, hub: HubClient, override_keyword: str, screen: 
     # hadn't already (see screen.html).
     screen.clear()
     screen.set_theme("green")
+    screen.start_recovery_music()   # control is back: the dramatic score builds under what follows
 
 
 def run_resolution(resolution: dict, voice: Voice, listener: VoiceListener) -> None:

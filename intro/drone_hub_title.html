@@ -5,18 +5,20 @@
 <title>Drone &amp; Robotics Hub 2.0</title>
 <style>
   html, body { margin: 0; width: 100%; height: 100%; background: #02050c; overflow: hidden; }
-  /* The opening title scene of the showcase video as a looping GIF: the first
-     screen of the show and the closing screen. Fills the width, centred. */
-  img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  /* The opening title scene of the showcase video (2.7s, seamless, full 5824x1248
+     quality) looping: the first screen of the show and the closing screen. */
+  video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
 </style>
 </head>
 <body>
-<img src="/intro/drone_hub_title.gif" alt="Drone &amp; Robotics Hub 2.0" id="g">
+<video id="v" src="/intro/title.mp4" autoplay muted loop playsinline preload="auto"></video>
 <script>
-  // screen.html fades this page in once __ready is set (the GIF has loaded).
-  const g = document.getElementById('g');
+  // screen.html fades this page in once __ready is set (the video is playing).
+  const v = document.getElementById('v');
   const ready = () => { window.__ready = true; };
-  if (g.complete) ready(); else { g.addEventListener('load', ready); g.addEventListener('error', ready); }
+  v.addEventListener('playing', ready, { once: true });
+  v.addEventListener('error', ready, { once: true });
+  v.play().catch(() => {});
 </script>
 </body>
 </html>
