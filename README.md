@@ -133,13 +133,9 @@ brew install portaudio   # for PyAudio (microphone access)
 
 ## Subtitles
 
-Everything said aloud during the show is captioned along the **bottom of the chatbot screen** (not the silent intro and closing screens):
+Only one part of the show is captioned: the **voiceover over the rogue head video** ("Every robot. Every drone. Every machine answers to me..."), along the bottom of the screen over the red video. Everything else (chatbot lines, the OVERRIDE command readout, what the student says) is spoken without subtitles.
 
-- **The chatbot's lines**, in the screen's own colour (terminal green; red once it has taken over). Each sentence is its own subtitle, and any sentence over 13 words is split so a subtitle never needs more than two lines.
-- **The voiceover over the rogue head video**, and the **commands read out** when control is regained — so they're captioned **over the videos** too.
-- **What the student says**, in white, as the microphone hears it (the same transcript that fills the left panel), shown for a few seconds. If a cue is confirmed by SPACE instead of by voice, there is nothing to caption.
-
-How they stay in step with the speech: with the plain voice the speech engine reports each word's position as it is spoken, so the subtitle changes exactly with the speech. The processed voices (rogue and dying) are rendered to audio first, so the sentence pauses in that audio are found and each subtitle starts right after one (within about 0.3s in testing). A subtitle always clears when its speech ends, and when the red "ENTER CODE" box is on screen the subtitles sit above it. The text is sized from the screen *height* (about 3.6vh), so it stays readable on a normal display and on the 5824x1248 video wall.
+How they stay in step: the voiceover is rendered to audio first, so the sentence pauses in that audio are found and each subtitle starts right after one (within about 0.3s in testing). A subtitle always clears when its speech ends, and when the red "ENTER CODE" box is on screen the subtitles sit above it. The text is sized from the screen *height* (about 3.6vh), so it stays readable on a normal display and on the 5824x1248 video wall.
 
 `--no-subtitles` turns them off. They change by about a quarter of a second at most behind the speech (the screen polls the show four times a second).
 

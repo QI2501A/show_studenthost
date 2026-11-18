@@ -343,8 +343,10 @@ class Subtitler:
                   mode): same spreading, over an estimated length.
     finish() always clears the subtitle, so it can never outstay the speech."""
 
-    def __init__(self, screen: "ChatbotScreen | None", display: str, spoken: str, who: str = "chatbot") -> None:
-        self.screen = screen
+    def __init__(self, screen: "ChatbotScreen | None", display: str, spoken: str, who: str = "chatbot", enabled: bool = False) -> None:
+        # Only the rogue voiceover over the head video is captioned (enabled=True);
+        # every other line is spoken without subtitles.
+        self.screen = screen if enabled else None
         self.who = who
         self.cues = [c for c, _ in subtitle_cues(display)]
         # Offsets are taken from the text the engine actually speaks (the
@@ -1080,7 +1082,7 @@ class ChatbotScreen:
             with self._state_lock:
                 self._state["heard_seq"] += 1
                 self._state["heard_segments"] = [text]
-            if self.subtitles_enabled:
+            if False:  # the student's words are no longer captioned
                 seq = self.set_subtitle(text, "student")
                 hold = max(2.5, 0.45 * len(text.split()))
                 timer = threading.Timer(hold, lambda: self.clear_subtitle(only_seq=seq))
@@ -1975,7 +1977,7 @@ def start_rogue_voiceover(screen: ChatbotScreen, voice: "Voice", text: str,
                 screen.set_speaking(True)  # also ducks the sirens/drone under it, same as any chatbot line
                 # Subtitles over the video, spread across the line's known length
                 # (less the effect's ~0.4s echo tail).
-                subs = Subtitler(screen, text, text)
+                subs = Subtitler(screen, text, text, enabled=True)
                 try:
                     samples, rate, seconds = None, 0, 0.735 * len(text.split())
                     try:
