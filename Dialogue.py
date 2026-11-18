@@ -66,13 +66,10 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_CONTENT = ROOT.parent / "robot-revolution" / "content.json"
 DEFAULT_VIDEO = ROOT.parent / "DroneHub_V3.mp4"  # played when IGNITE fires (the 5824x1248 video-wall cut)
 LEGACY_VIDEO = ROOT.parent / "DroneHub_Video.mp4"  # the previous cut -- only used if V3 isn't on this machine
-# The drone-light title page, "Drone & Robotics Hub 2.0" (the ITE logo and title
-# assembled from drone lights on a starry horizon; a self-contained animated
-# canvas page). It is both bookends of the show: the first screen, shown before
-# the show starts (see ChatbotScreen.run_intro), and the closing screen.
-# intro/drone_hub_welcome_ite.html is the original "Welcome to Drone Hub 2.0"
-# version of the same page -- no longer used, kept in case it's wanted back
-# (point TITLE_PAGE at it to bring it back for both).
+# The title page: the showcase video's own opening title scene, "Drone &
+# Robotics Hub 2.0", as a looping GIF (intro/drone_hub_title.gif) on a black
+# page. It is both bookends of the show: the first screen, shown before the
+# show starts (see ChatbotScreen.run_intro), and the closing screen.
 TITLE_PAGE = ROOT / "intro" / "drone_hub_title.html"
 INTRO_PAGE = TITLE_PAGE
 INTRO_FADE_S = 5.0  # seconds for the intro to crossfade into the digital rain
@@ -83,7 +80,7 @@ DEFAULT_SHOWCASE_VIDEO = ROOT.parent / "Drone_Robotics_Hub_Showcase_5824x1248.mp
 # title scene, "DRONE & ROBOTICS HUB 2.0") plays on repeat until the operator
 # ends the show. Without it the screen just holds the showcase's last frame.
 DEFAULT_SHOWCASE_LOOP = ROOT.parent / "Drone_Robotics_Hub_Showcase_loop.mp4"
-# The closing screen after the showcase: the same drone-light title page as the
+# The closing screen after the showcase: the same GIF title page as the
 # first screen. Preferred over the loop video above.
 CLOSING_PAGE = TITLE_PAGE
 # Spoken over the rogue "head" video, in the menacing rogue voice. Kept to ~17
@@ -781,7 +778,7 @@ class _ScreenHandler(http.server.BaseHTTPRequestHandler):
             self._serve_video()
         elif self.path.startswith("/music"):
             self._serve_music()
-        elif self.path.startswith("/js/") or self.path.startswith("/vendor/"):
+        elif self.path.startswith(("/js/", "/vendor/", "/intro/")):
             self._serve_static()
         else:
             self.send_response(404)
