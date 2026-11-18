@@ -47,6 +47,7 @@ import platform
 import queue
 import re
 import shutil
+import socket
 import socketserver
 import string
 import subprocess
@@ -571,8 +572,41 @@ def launch_browser(url: str) -> str:
 
 
 class _ScreenHTTPServer(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True
+    # POSIX: SO_REUSEADDR so a quick restart isn't blocked by TIME_WAIT. On
+    # Windows SO_REUSEADDR means something very different -- it lets a SECOND
+    # process bind the same port and listen alongside the first, and the
+    # browser is then served by whichever one Windows picks (usually the old
+    # one), so a freshly started show silently shows the previous run's screens.
+    # Windows instead asks for exclusive use, so a second copy fails loudly.
+    allow_reuse_address = sys.platform != "win32"
     daemon_threads = True
+
+    def server_bind(self) -> None:
+        if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def find_port_owner(port: int) -> "tuple[bool, str | None]":
+    """(in_use, description_of_owner). Something already answering on
+    127.0.0.1:port means another show (or anything else) holds the port. The
+    owner's pid is looked up with netstat on Windows, best-effort."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.4):
+            pass
+    except OSError:
+        return False, None
+    owner = None
+    if sys.platform == "win32":
+        try:
+            out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=5).stdout
+            pids = sorted({line.split()[-1] for line in out.splitlines()
+                           if f":{port} " in line and "LISTENING" in line})
+            if pids:
+                owner = "pid " + ", ".join(pids)
+        except Exception:
+            pass
+    return True, owner
 
 
 class _ScreenHandler(http.server.BaseHTTPRequestHandler):
@@ -1062,6 +1096,10 @@ class ChatbotScreen:
         if self.httpd:
             try:
                 self.httpd.shutdown()
+            except Exception:
+                pass
+            try:
+                self.httpd.server_close()  # actually release the port, so the next run can have it straight away
             except Exception:
                 pass
 
@@ -2073,6 +2111,20 @@ def main() -> None:
 
     cfg = load_show_host_config()
     music_path = resolve_optional_path(cfg, "rogue_music")
+    if not args.no_screen:
+        in_use, owner = find_port_owner(ChatbotScreen.PORT)
+        if in_use:
+            bar = "=" * 70
+            print(f"\n{ANSI['red']}{bar}\n"
+                  f"  ANOTHER SHOW IS ALREADY RUNNING (port {ChatbotScreen.PORT} is taken"
+                  f"{', ' + owner if owner else ''}).\n"
+                  f"{bar}{ANSI['reset']}\n"
+                  "  A new show started now would share that port with the old one, and the\n"
+                  "  screen would keep showing the OLD show's pages and behaviour.\n\n"
+                  "  Close the old one first: switch to its 'Show Host' window and press\n"
+                  "  ENTER (or Ctrl+C) -- it stays open on the closing screen until you do --\n"
+                  "  then start the show again.\n")
+            sys.exit(2)
     screen = ChatbotScreen(enabled=not args.no_screen, music_path=music_path, intro=not args.no_intro)
     vo_box: dict = {}  # filled in by the background voiceover render; its temp WAV is deleted on the way out
     try:

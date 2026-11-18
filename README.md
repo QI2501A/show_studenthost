@@ -131,6 +131,10 @@ brew install portaudio   # for PyAudio (microphone access)
 
 (`pyobjc`, needed for `pyttsx3`'s speech voice, installs on its own from `requirements.txt`.)
 
+## Only one show at a time
+
+The show ends on its closing screen and **stays running until you press ENTER (or Ctrl+C) in its "Show Host" window** — that's what keeps the closing screen up. So the previous run is still alive when you come back to start the next one, and it is still holding port 8765. Starting a second show on top of it used to *silently share* the port on Windows: the browser kept being served by the old run, so the new run appeared to ignore every change. Now a new run **refuses to start** and says so (`ANOTHER SHOW IS ALREADY RUNNING (port 8765 is taken, pid ...)`), and the screen server asks Windows for exclusive use of the port so it can't be shared by accident. If you see that message: go to the old "Show Host" window, press ENTER, then start the show again. (`--no-screen` runs skip the check.)
+
 ## Running from a terminal
 
 Equivalent to the launcher, if you'd rather drive it by hand:
