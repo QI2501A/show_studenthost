@@ -66,9 +66,15 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_CONTENT = ROOT.parent / "robot-revolution" / "content.json"
 DEFAULT_VIDEO = ROOT.parent / "DroneHub_V3.mp4"  # played when IGNITE fires (the 5824x1248 video-wall cut)
 LEGACY_VIDEO = ROOT.parent / "DroneHub_Video.mp4"  # the previous cut -- only used if V3 isn't on this machine
-# The welcome/intro page shown on the chatbot screen before the show starts
-# (see ChatbotScreen.run_intro). A self-contained animated canvas page.
-INTRO_PAGE = ROOT / "intro" / "drone_hub_welcome_ite.html"
+# The drone-light title page, "Drone & Robotics Hub 2.0" (the ITE logo and title
+# assembled from drone lights on a starry horizon; a self-contained animated
+# canvas page). It is both bookends of the show: the first screen, shown before
+# the show starts (see ChatbotScreen.run_intro), and the closing screen.
+# intro/drone_hub_welcome_ite.html is the original "Welcome to Drone Hub 2.0"
+# version of the same page -- no longer used, kept in case it's wanted back
+# (point TITLE_PAGE at it to bring it back for both).
+TITLE_PAGE = ROOT / "intro" / "drone_hub_title.html"
+INTRO_PAGE = TITLE_PAGE
 INTRO_FADE_S = 5.0  # seconds for the intro to crossfade into the digital rain
 # The closing showcase video: once the robots are back under control and the
 # show has reached its last screen, SPACE plays this (see run_showcase).
@@ -77,9 +83,9 @@ DEFAULT_SHOWCASE_VIDEO = ROOT.parent / "Drone_Robotics_Hub_Showcase_5824x1248.mp
 # title scene, "DRONE & ROBOTICS HUB 2.0") plays on repeat until the operator
 # ends the show. Without it the screen just holds the showcase's last frame.
 DEFAULT_SHOWCASE_LOOP = ROOT.parent / "Drone_Robotics_Hub_Showcase_loop.mp4"
-# The closing screen after the showcase: the welcome page's drone-light animation
-# with the "Drone & Robotics Hub 2.0" wording. Preferred over the loop video above.
-CLOSING_PAGE = ROOT / "intro" / "drone_hub_closing.html"
+# The closing screen after the showcase: the same drone-light title page as the
+# first screen. Preferred over the loop video above.
+CLOSING_PAGE = TITLE_PAGE
 # Spoken over the rogue "head" video, in the menacing rogue voice. Kept to ~17
 # words: that's about 12.5s of audio, which fits the 12.8s video (see
 # voicefx.rogue_voice for why it's so much longer than the word count suggests).
