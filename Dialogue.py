@@ -72,6 +72,7 @@ LEGACY_VIDEO = ROOT.parent / "DroneHub_Video.mp4"  # the previous cut -- only us
 # show starts (see ChatbotScreen.run_intro), and the closing screen.
 TITLE_PAGE = ROOT / "intro" / "drone_hub_title.html"
 INTRO_PAGE = TITLE_PAGE
+RAIN_MUSIC = ROOT / "audio" / "rain_theme.ogg"  # looping bed under the digital-rain chat, until IGNITE (make_rain_music.py)
 INTRO_FADE_S = 5.0  # seconds for the intro to crossfade into the digital rain
 # The closing showcase video: once the robots are back under control and the
 # show has reached its last screen, SPACE plays this (see run_showcase).
@@ -778,7 +779,7 @@ class _ScreenHandler(http.server.BaseHTTPRequestHandler):
             self._serve_video()
         elif self.path.startswith("/music"):
             self._serve_music()
-        elif self.path.startswith(("/js/", "/vendor/", "/intro/")):
+        elif self.path.startswith(("/js/", "/vendor/", "/intro/", "/audio/")):
             self._serve_static()
         else:
             self.send_response(404)
@@ -936,7 +937,7 @@ class ChatbotScreen:
 
     PORT = 8765
 
-    def __init__(self, enabled: bool = True, music_path: "Path | None" = None, intro: bool = False,
+    def __init__(self, enabled: bool = True, music_path: "Path | None" = None, intro: bool = False, rain_music: bool = True,
                  subtitles: bool = True) -> None:
         self.available = False
         self.subtitles_enabled = bool(subtitles and enabled)  # captions along the bottom of the screen (see set_subtitle)
@@ -962,6 +963,7 @@ class ChatbotScreen:
             "seq": 0, "mode": "chat", "segments": [], "rate_wpm": SPEECH_RATE_WPM,
             "theme": "green", "clear_seq": 0, "speaking": False,
             "has_music_file": self._music_path is not None,
+            "has_rain_music": bool(rain_music and RAIN_MUSIC.is_file()),
             "heard_seq": 0, "heard_segments": [],
             "override_feedback_seq": 0, "override_feedback_ok": True,
             "intro": "waiting" if self.intro_enabled else "off", "intro_fade_s": INTRO_FADE_S,
@@ -2296,6 +2298,8 @@ def main() -> None:
                              "(default: ../Drone_Robotics_Hub_Showcase_loop.mp4, or config.yaml's showcase_loop_video)")
     parser.add_argument("--no-showcase", action="store_true",
                         help="end the show at the final line, without waiting to play the closing showcase video")
+    parser.add_argument("--no-rain-music", action="store_true",
+                        help="no background music during the digital-rain chatbot portion")
     parser.add_argument("--no-subtitles", action="store_true",
                         help="don't show subtitles along the bottom of the chatbot screen")
     parser.add_argument("--no-intro", action="store_true",
@@ -2324,7 +2328,7 @@ def main() -> None:
                   "  then start the show again.\n")
             sys.exit(2)
     screen = ChatbotScreen(enabled=not args.no_screen, music_path=music_path, intro=not args.no_intro,
-                           subtitles=not args.no_subtitles)
+                           subtitles=not args.no_subtitles, rain_music=not args.no_rain_music)
     vo_box: dict = {}  # filled in by the background voiceover render; its temp WAV is deleted on the way out
     try:
         content = load_content(args.content)

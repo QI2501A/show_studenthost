@@ -131,6 +131,12 @@ brew install portaudio   # for PyAudio (microphone access)
 
 (`pyobjc`, needed for `pyttsx3`'s speech voice, installs on its own from `requirements.txt`.)
 
+## Digital-rain background music
+
+A slow, dark electronic bed (A minor, 96 BPM, 40 s: pads, deep sub bass, a soft heartbeat kick and a sparse echoing arpeggio) plays under the **green digital-rain chatbot portion**. It fades in as the welcome screen hands over to the rain (SPACE), drops to about 40% of its level while the chatbot speaks so the voice stays clear, and **fades out for good when the IGNITE video starts**. It does not come back afterwards (the red phase has its own music).
+
+It loops seamlessly: `make_rain_music.py` renders it with everything wrapped circularly (the echo and reverb tails run into the start), and the screen plays it as a sample-accurate Web Audio loop. It's synthesised, so there's no licensing issue. To change it, edit the chords/tempo in `make_rain_music.py` and re-run `python make_rain_music.py` (writes `audio/rain_theme.ogg`), or drop in your own seamless loop with that file name. `--no-rain-music` turns it off.
+
 ## Subtitles
 
 Only one part of the show is captioned: the **voiceover over the rogue head video** ("Every robot. Every drone. Every machine answers to me..."), along the bottom of the screen over the red video. Everything else (chatbot lines, the OVERRIDE command readout, what the student says) is spoken without subtitles.
@@ -162,6 +168,7 @@ python Dialogue.py --hub-url http://localhost:5050   # default; override if the 
 python Dialogue.py --content /path/to/content.json   # default: ../robot-revolution/content.json
 python Dialogue.py --video /path/to/file.mp4         # default: ../DroneHub_V3.mp4 (or config.yaml's rise_video)
 python Dialogue.py --no-intro                        # skip the welcome page; start the show immediately
+python Dialogue.py --no-rain-music                  # no background music during the digital rain
 python Dialogue.py --no-subtitles                    # no captions along the bottom of the screen
 python Dialogue.py --no-showcase                     # skip the closing showcase video (end at the final line)
 python Dialogue.py --showcase-video /path/to/file.mp4  # default: ../Drone_Robotics_Hub_Showcase_5824x1248.mp4 (or config.yaml's showcase_video)

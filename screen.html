@@ -634,6 +634,50 @@
 
     function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
+    // --- Digital-rain background music ---
+    // /audio/rain_theme.ogg (made by make_rain_music.py) loops under the
+    // green chatbot portion: it fades in as the welcome screen hands over to
+    // the rain, ducks under the chatbot's voice, and fades out for good when
+    // the first video (IGNITE) starts. Played as a Web Audio buffer with
+    // loop=true, which repeats sample-accurately -- no gap at the join.
+    const RAIN_LEVEL = 0.5, RAIN_DUCKED = 0.2;
+    let hasRainMusic = false, rainState = 'idle', rainCtx = null, rainGain = null, rainSrc = null;
+    let rainSpeaking = false, videoEverPlayed = false;
+    function rainTarget() { return rainSpeaking ? RAIN_DUCKED : RAIN_LEVEL; }
+    async function startRainMusic() {
+      if (rainState !== 'idle' || !hasRainMusic || !active || videoEverPlayed) return;
+      rainState = 'loading';
+      try {
+        rainCtx = new (window.AudioContext || window.webkitAudioContext)();
+        rainGain = rainCtx.createGain();
+        rainGain.gain.value = 0;
+        rainGain.connect(rainCtx.destination);
+        const buf = await rainCtx.decodeAudioData(await (await fetch('/audio/rain_theme.ogg')).arrayBuffer());
+        if (rainState !== 'loading') return;           // the video started while it was decoding
+        rainSrc = rainCtx.createBufferSource();
+        rainSrc.buffer = buf;
+        rainSrc.loop = true;
+        rainSrc.connect(rainGain);
+        rainSrc.start();
+        rainState = 'playing';
+        rainGain.gain.setTargetAtTime(rainTarget(), rainCtx.currentTime, 1.2);  // slow fade-in
+        if (rainCtx.state === 'suspended') rainCtx.resume().catch(() => {});
+      } catch (e) { rainState = 'idle'; hasRainMusic = false; }
+    }
+    function stopRainMusic(fadeS) {
+      if (rainState === 'idle' || rainState === 'stopped') { rainState = 'stopped'; return; }
+      rainState = 'stopped';
+      const ctx = rainCtx, src = rainSrc;
+      if (!ctx) return;
+      try { rainGain.gain.setTargetAtTime(0, ctx.currentTime, fadeS / 4); } catch (e) {}
+      setTimeout(() => { try { if (src) src.stop(); ctx.close(); } catch (e) {} }, fadeS * 1000 + 300);
+    }
+    function nudgeRainMusic() {   // a key/click is a user gesture: lets a suspended context play
+      if (rainCtx && rainCtx.state === 'suspended') rainCtx.resume().catch(() => {});
+    }
+    document.addEventListener('keydown', nudgeRainMusic);
+    document.addEventListener('click', nudgeRainMusic);
+
     // --- Rogue-phase background music ---
     // Prefers a real licensed track (server-configured via config.yaml's
     // rogue_music, served at /music) if one exists; otherwise synthesizes an
@@ -1206,6 +1250,7 @@
           videoEl.muted = true;
           try { videoEl.pause(); } catch (err) {}
           stopMenacingMusic();
+          stopRainMusic(0.3);
           stopRogueSirens();
           stopDyingSirens(false);
           dismissOverlay();
@@ -1298,6 +1343,8 @@
     let lastVideoId = -1;
     function enterVideoMode() {
       mode = 'video';
+      videoEverPlayed = true;
+      stopRainMusic(1.6);                     // IGNITE: the rain music ends as the video starts
       panelEl.style.display = 'none';
       heardPanelEl.style.display = 'none';
       headContainerEl.style.display = 'none';
@@ -1367,6 +1414,10 @@
         if (data.subtitle && data.subtitle.seq !== lastSubtitleSeq) setSubtitle(data.subtitle);
         if (typeof data.rate_wpm === 'number' && data.rate_wpm > 0) rateWpm = data.rate_wpm;
         if (typeof data.has_music_file === 'boolean') hasMusicFile = data.has_music_file;
+        if (data.has_rain_music === true && rainState === 'idle') hasRainMusic = true;
+        rainSpeaking = data.speaking === true;
+        if (rainState === 'playing') rainGain.gain.setTargetAtTime(rainTarget(), rainCtx.currentTime, 0.15);
+        else if (hasRainMusic && rainState === 'idle' && introPhase !== 'waiting' && data.mode !== 'video') startRainMusic();
         if (typeof data.speaking === 'boolean' && window.__skullHead) window.__skullHead.setSpeaking(data.speaking);
         if (typeof data.speaking === 'boolean') (window.__rogueSkulls || []).forEach((s) => s.setSpeaking(data.speaking));
         setSirenDuck(data.speaking === true, data.mode === 'video'); // keep the voice/video audible over the sirens
