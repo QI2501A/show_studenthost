@@ -131,6 +131,18 @@ brew install portaudio   # for PyAudio (microphone access)
 
 (`pyobjc`, needed for `pyttsx3`'s speech voice, installs on its own from `requirements.txt`.)
 
+## Subtitles
+
+Everything said aloud during the show is captioned along the **bottom of the chatbot screen** (not the silent intro and closing screens):
+
+- **The chatbot's lines**, in the screen's own colour (terminal green; red once it has taken over). Each sentence is its own subtitle, and any sentence over 13 words is split so a subtitle never needs more than two lines.
+- **The voiceover over the rogue head video**, and the **commands read out** when control is regained — so they're captioned **over the videos** too.
+- **What the student says**, in white, as the microphone hears it (the same transcript that fills the left panel), shown for a few seconds. If a cue is confirmed by SPACE instead of by voice, there is nothing to caption.
+
+How they stay in step with the speech: with the plain voice the speech engine reports each word's position as it is spoken, so the subtitle changes exactly with the speech. The processed voices (rogue and dying) are rendered to audio first, so the sentence pauses in that audio are found and each subtitle starts right after one (within about 0.3s in testing). A subtitle always clears when its speech ends, and when the red "ENTER CODE" box is on screen the subtitles sit above it. The text is sized from the screen *height* (about 3.6vh), so it stays readable on a normal display and on the 5824x1248 video wall.
+
+`--no-subtitles` turns them off. They change by about a quarter of a second at most behind the speech (the screen polls the show four times a second).
+
 ## Only one show at a time
 
 The show ends on its closing screen and **stays running until you press ENTER (or Ctrl+C) in its "Show Host" window** — that's what keeps the closing screen up. So the previous run is still alive when you come back to start the next one, and it is still holding port 8765. Starting a second show on top of it used to *silently share* the port on Windows: the browser kept being served by the old run, so the new run appeared to ignore every change. Now a new run **refuses to start** and says so (`ANOTHER SHOW IS ALREADY RUNNING (port 8765 is taken, pid ...)`), and the screen server asks Windows for exclusive use of the port so it can't be shared by accident. If you see that message: go to the old "Show Host" window, press ENTER, then start the show again. (`--no-screen` runs skip the check.)
@@ -154,6 +166,7 @@ python Dialogue.py --hub-url http://localhost:5050   # default; override if the 
 python Dialogue.py --content /path/to/content.json   # default: ../robot-revolution/content.json
 python Dialogue.py --video /path/to/file.mp4         # default: ../DroneHub_V3.mp4 (or config.yaml's rise_video)
 python Dialogue.py --no-intro                        # skip the welcome page; start the show immediately
+python Dialogue.py --no-subtitles                    # no captions along the bottom of the screen
 python Dialogue.py --no-showcase                     # skip the closing showcase video (end at the final line)
 python Dialogue.py --showcase-video /path/to/file.mp4  # default: ../Drone_Robotics_Hub_Showcase_5824x1248.mp4 (or config.yaml's showcase_video)
 python Dialogue.py --rogue-video /path/to/file.mp4   # default: ../DH_Asset6_RobotRevolution_trim.mp4 (or config.yaml's rogue_video)

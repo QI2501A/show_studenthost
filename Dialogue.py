@@ -300,6 +300,128 @@ def sentence_lines(text: str) -> list[str]:
     return lines
 
 
+def subtitle_cues(text: str, max_words: int = 13) -> "list[tuple[str, int]]":
+    """Splits spoken text into subtitle cues -- (cue_text, start_offset_in_text)
+    -- one per sentence, with any sentence longer than max_words broken into
+    near-equal word chunks so a cue never needs more than two lines on screen.
+    The offsets let the speech engine's per-word position events pick the cue
+    being spoken (see Subtitler.on_word)."""
+    cues: list[tuple[str, int]] = []
+    cursor = 0
+    for piece in (p.strip() for p in _SENTENCE_SPLIT_RE.split(text or "")):
+        if not piece:
+            continue
+        start = text.find(piece, cursor)
+        if start < 0:
+            start = cursor
+        words = piece.split()
+        if len(words) <= max_words:
+            cues.append((piece, start))
+        else:
+            n = -(-len(words) // max_words)       # ceil: number of chunks
+            size = -(-len(words) // n)            # near-equal chunks
+            pos = start
+            for i in range(0, len(words), size):
+                chunk = " ".join(words[i: i + size])
+                at = text.find(words[i], pos)
+                cues.append((chunk, at if at >= 0 else pos))
+                pos = (at if at >= 0 else pos) + len(chunk)
+        cursor = start + len(piece)
+    return cues
+
+
+class Subtitler:
+    """Drives the on-screen subtitle for ONE spoken segment. Three ways to
+    follow the speech, best first:
+      on_word  -- the speech engine reports each word's character position as
+                  it is spoken (plain voice): the cue changes exactly with the
+                  speech;
+      on_play  -- a processed voice (rogue/dying) is rendered to audio and then
+                  played, so its length is known: cues are spread across that
+                  length in proportion to their text length;
+      start_timed -- no events and no known length (macOS `say`, or text-only
+                  mode): same spreading, over an estimated length.
+    finish() always clears the subtitle, so it can never outstay the speech."""
+
+    def __init__(self, screen: "ChatbotScreen | None", display: str, spoken: str, who: str = "chatbot") -> None:
+        self.screen = screen
+        self.who = who
+        self.cues = [c for c, _ in subtitle_cues(display)]
+        # Offsets are taken from the text the engine actually speaks (the
+        # pronunciation fixups change a few characters, never the sentence or
+        # word structure, so cue i is the same cue in both).
+        spoken_cues = subtitle_cues(spoken)
+        self.starts = [s for _, s in spoken_cues] if len(spoken_cues) == len(self.cues) else []
+        self.current = -1
+        self._cancel = threading.Event()
+        self._thread: "threading.Thread | None" = None
+
+    @property
+    def active(self) -> bool:
+        return bool(self.screen and self.screen.subtitles_enabled and self.cues)
+
+    def _show(self, i: int) -> None:
+        if self.active and 0 <= i < len(self.cues) and i != self.current:
+            self.current = i
+            self.screen.set_subtitle(self.cues[i], self.who)
+
+    def on_start(self) -> None:
+        self._show(0)
+
+    def on_word(self, name, location, length) -> None:  # pyttsx3 'started-word'
+        if not (self.active and self.starts and isinstance(location, int)):
+            return
+        idx = max((i for i, s in enumerate(self.starts) if s <= location), default=0)
+        self._show(idx)
+
+    def start_timed(self, duration_s: float, starts: "list[float] | None" = None) -> None:
+        """Shows the cues in turn. With `starts` (seconds from now, one per
+        cue -- measured from the audio's own pauses) each cue appears at its
+        time; otherwise the cues are spread over duration_s in proportion to
+        their length, with a per-sentence allowance for the pause after it
+        (real speech pauses at each full stop, so short sentences take longer
+        than their length suggests)."""
+        if not self.active or self._thread is not None:
+            return
+        if not starts or len(starts) != len(self.cues):
+            weights = [0.4 * len(c.split()) + 0.9 for c in self.cues]
+            total, acc, starts = float(sum(weights)), 0.0, []
+            for w in weights:
+                starts.append(acc)
+                acc += max(0.5, duration_s) * w / total
+
+        def run() -> None:
+            t0 = time.monotonic()
+            for i, at in enumerate(starts):
+                while not self._cancel.is_set() and time.monotonic() < t0 + at:
+                    time.sleep(0.03)
+                if self._cancel.is_set():
+                    return
+                self._show(i)
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+
+    def on_play(self, duration_s: float, samples=None, rate: int = 0) -> None:
+        """A processed voice is about to play: use its audio, if it's given, to
+        find where each sentence starts; else spread the cues over its length."""
+        starts = None
+        if samples is not None and rate and len(self.cues) > 1:
+            try:
+                import voicefx
+
+                starts = voicefx.cue_start_times(samples, rate, len(self.cues))
+            except Exception:
+                starts = None
+        self.start_timed(duration_s, starts)
+
+    def finish(self) -> None:
+        self._cancel.set()
+        if self.screen and self.screen.subtitles_enabled and self.current >= 0:
+            self.screen.clear_subtitle()
+        self.current = -1
+
+
 # "live" is a heteronym: TTS engines default to the adjective (rhymes with
 # "hive", as in "live broadcast"), but the script uses it as the verb (rhymes
 # with "give", as in "live in a screen" / "living"). Respelling it is the
@@ -815,8 +937,11 @@ class ChatbotScreen:
 
     PORT = 8765
 
-    def __init__(self, enabled: bool = True, music_path: "Path | None" = None, intro: bool = False) -> None:
+    def __init__(self, enabled: bool = True, music_path: "Path | None" = None, intro: bool = False,
+                 subtitles: bool = True) -> None:
         self.available = False
+        self.subtitles_enabled = bool(subtitles and enabled)  # captions along the bottom of the screen (see set_subtitle)
+        self._subtitle_clear_timer: "threading.Timer | None" = None
         # Intro: the welcome page covers the screen from the moment it opens,
         # until run_intro() is told to start (SPACE on the screen, ENTER at the
         # terminal, or POST /intro-start from anything else). Only if the page
@@ -842,6 +967,7 @@ class ChatbotScreen:
             "override_feedback_seq": 0, "override_feedback_ok": True,
             "intro": "waiting" if self.intro_enabled else "off", "intro_fade_s": INTRO_FADE_S,
             "hold_last_frame": False, "video_loop": False, "video_id": 0, "closing": "off",
+            "subtitle": {"seq": 0, "text": "", "who": ""},
         }
         if not enabled:
             return
@@ -947,11 +1073,42 @@ class ChatbotScreen:
         """Feeds the mic's live speech-to-text transcript to the screen's
         left panel — separate from show()'s chat panel (the chatbot's own
         answers, centre), so what the system heard the student say and what
-        it says back never mix into the same log."""
+        it says back never mix into the same log. It is also shown as a
+        subtitle (white, versus the chatbot's coloured ones) for a few
+        seconds, long enough to read."""
         if self.available and text:
             with self._state_lock:
                 self._state["heard_seq"] += 1
                 self._state["heard_segments"] = [text]
+            if self.subtitles_enabled:
+                seq = self.set_subtitle(text, "student")
+                hold = max(2.5, 0.45 * len(text.split()))
+                timer = threading.Timer(hold, lambda: self.clear_subtitle(only_seq=seq))
+                timer.daemon = True
+                timer.start()
+
+    def set_subtitle(self, text: str, who: str = "chatbot") -> int:
+        """Puts one subtitle line along the bottom of the chatbot screen (all
+        phases, including over the videos). Returns its sequence number --
+        clear_subtitle(only_seq=...) only clears that line, so a timer for an
+        old line can never wipe a newer one."""
+        if not (self.available and self.subtitles_enabled):
+            return -1
+        with self._state_lock:
+            seq = self._state["subtitle"]["seq"] + 1
+            self._state["subtitle"] = {"seq": seq, "text": text, "who": who}
+        return seq
+
+    def clear_subtitle(self, only_seq: "int | None" = None) -> None:
+        if not (self.available and self.subtitles_enabled):
+            return
+        with self._state_lock:
+            cur = self._state["subtitle"]
+            if only_seq is not None and cur["seq"] != only_seq:
+                return
+            if not cur["text"]:
+                return
+            self._state["subtitle"] = {"seq": cur["seq"] + 1, "text": "", "who": cur["who"]}
 
     def play_video(self, path: Path, speed: float = 1.0, timeout_s: float = 900,
                    hold_last_frame: bool = False) -> bool:
@@ -1222,7 +1379,7 @@ class Voice:
             return
         ready.set()
         while True:
-            text, done, result, style, intensity, render_to = self._tts_queue.get()
+            text, done, result, style, intensity, render_to, subs = self._tts_queue.get()
             try:
                 engine = Engine(None, False)
                 try:
@@ -1234,7 +1391,13 @@ class Voice:
                         # effected line to a WAV to be played later; never speak
                         # a plain fallback here -- the caller does that itself.
                         result["rendered"] = bool(self._speak_styled(engine, text, style, intensity, render_to))
-                    elif not (style and self._speak_styled(engine, text, style, intensity)):
+                    elif not (style and self._speak_styled(engine, text, style, intensity, None, subs)):
+                        if subs is not None:
+                            # Plain voice: the engine reports each word's
+                            # position as it is spoken, so the subtitle
+                            # changes exactly with the speech.
+                            engine.connect("started-word", subs.on_word)
+                            subs.on_start()
                         engine.say(text)
                         engine.runAndWait()
                 finally:
@@ -1251,7 +1414,7 @@ class Voice:
     STYLE_RATE_WPM = {"rogue": 128, "dying": 170}  # dying: voicefx stretches it ~1.5x, so start brisk
 
     def _speak_styled(self, engine, text: str, style: str, intensity: float,
-                      render_to: "str | None" = None) -> bool:
+                      render_to: "str | None" = None, subs: "Subtitler | None" = None) -> bool:
         """Renders `text` to a WAV with the SAPI voice, runs it through the
         matching voicefx effect and plays the result (blocking until done) --
         or, with render_to, writes the finished WAV there and returns without
@@ -1283,6 +1446,10 @@ class Voice:
             fd, out_path = tempfile.mkstemp(suffix=".wav", prefix="chatbot_fx_")
             os.close(fd)
             voicefx.write_wav(out_path, processed, rate)
+            if subs is not None:
+                # The finished audio's length is known, so spread the cues over
+                # it (less the effect's ~0.4s echo tail).
+                subs.on_play(processed.size / rate - 0.4, processed, rate)
             winsound.PlaySound(out_path, winsound.SND_FILENAME)
             return True
         except ImportError as exc:
@@ -1340,7 +1507,7 @@ class Voice:
         path = Path(tempfile.gettempdir()) / f"dronehub_vo_{os.getpid()}_{abs(hash((text, style))) % 100000}.wav"
         done = threading.Event()
         result: dict = {}
-        self._tts_queue.put((text, done, result, style, 0.0, str(path)))
+        self._tts_queue.put((text, done, result, style, 0.0, str(path), None))
         if not done.wait(self.SAY_TIMEOUT_S) or not result.get("rendered") or "error" in result:
             return None
         return path
@@ -1351,13 +1518,14 @@ class Voice:
 
         winsound.PlaySound(str(path), winsound.SND_FILENAME)
 
-    def _speak_pyttsx3(self, text: str, style: str | None = None, intensity: float = 0.0) -> None:
+    def _speak_pyttsx3(self, text: str, style: str | None = None, intensity: float = 0.0,
+                       subs: "Subtitler | None" = None) -> None:
         """Hands text to the dedicated TTS worker thread and blocks (with the
         usual safety-net timeout) until it's spoken — never touches the
         engine directly from this (caller's) thread."""
         done = threading.Event()
         result: dict = {}
-        self._tts_queue.put((text, done, result, style, intensity, None))
+        self._tts_queue.put((text, done, result, style, intensity, None, subs))
         if not done.wait(self.SAY_TIMEOUT_S):
             print(f"[voice] TTS playback did not finish within {self.SAY_TIMEOUT_S}s; "
                   "skipping audio for this line.")
@@ -1383,23 +1551,31 @@ class Voice:
             # No audio — still pace the narration roughly like real speech,
             # including the scripted pause, so timing feels natural either way,
             # and still flag "speaking" so the head on-screen animates.
-            word_count = sum(len(s.split()) for s in segments)
-            duration = min(8.0, max(0.6, word_count / 2.5)) + self.PARAGRAPH_PAUSE_S * (len(segments) - 1)
             if self.screen:
                 self.screen.set_speaking(True)
-            time.sleep(duration)
+            for i, segment in enumerate(segments):
+                subs = Subtitler(self.screen, segment, segment)
+                seg_words = len(segment.split())
+                subs.start_timed(min(8.0, max(0.6, seg_words / 2.5)))
+                time.sleep(min(8.0, max(0.6, seg_words / 2.5)))
+                subs.finish()
+                if i < len(segments) - 1:
+                    time.sleep(self.PARAGRAPH_PAUSE_S)
             if self.screen:
                 self.screen.set_speaking(False)
             return
 
         for i, segment in enumerate(segments):
             spoken = apply_pronunciation_fixups(segment)
+            subs = Subtitler(self.screen, segment, spoken)
             if self.screen:
                 self.screen.set_speaking(True)
             try:
                 if self.mode == "pyttsx3":
-                    self._speak_pyttsx3(spoken, style, intensity)
+                    self._speak_pyttsx3(spoken, style, intensity, subs)
                 else:
+                    # macOS `say` reports no word positions: spread the cues over an estimate.
+                    subs.start_timed(0.313 * len(segment.split()) + 0.65 * max(1, len(subs.cues)))
                     ok, _ = run_with_timeout(
                         lambda spoken=spoken: self._speak_say_cmd(spoken, style), self.SAY_TIMEOUT_S)
                     if not ok:
@@ -1408,6 +1584,7 @@ class Voice:
             except Exception as exc:
                 print(f"[voice] TTS playback failed ({exc}).")
             finally:
+                subs.finish()  # the subtitle never outlasts the speech
                 if self.screen:
                     self.screen.set_speaking(False)
             if i < len(segments) - 1:
@@ -1796,9 +1973,23 @@ def start_rogue_voiceover(screen: ChatbotScreen, voice: "Voice", text: str,
             path = box.get("path")
             if path and Path(path).exists():
                 screen.set_speaking(True)  # also ducks the sirens/drone under it, same as any chatbot line
+                # Subtitles over the video, spread across the line's known length
+                # (less the effect's ~0.4s echo tail).
+                subs = Subtitler(screen, text, text)
                 try:
+                    samples, rate, seconds = None, 0, 0.735 * len(text.split())
+                    try:
+                        import voicefx
+
+                        samples, rate = voicefx.read_wav(str(path))
+                        if samples is not None:
+                            seconds = samples.size / float(rate)
+                    except Exception:
+                        samples = None
+                    subs.on_play(seconds - 0.4, samples, rate)   # cues placed at the audio's own sentence pauses
                     voice.play_prerendered(path)
                 finally:
+                    subs.finish()
                     screen.set_speaking(False)
             else:
                 voice.say(text, style="rogue", show=False)
@@ -2106,6 +2297,8 @@ def main() -> None:
                              "(default: ../Drone_Robotics_Hub_Showcase_loop.mp4, or config.yaml's showcase_loop_video)")
     parser.add_argument("--no-showcase", action="store_true",
                         help="end the show at the final line, without waiting to play the closing showcase video")
+    parser.add_argument("--no-subtitles", action="store_true",
+                        help="don't show subtitles along the bottom of the chatbot screen")
     parser.add_argument("--no-intro", action="store_true",
                         help="skip the welcome/intro page and start the show immediately (for rehearsal)")
     parser.add_argument("--video", default=None,
@@ -2131,7 +2324,8 @@ def main() -> None:
                   "  ENTER (or Ctrl+C) -- it stays open on the closing screen until you do --\n"
                   "  then start the show again.\n")
             sys.exit(2)
-    screen = ChatbotScreen(enabled=not args.no_screen, music_path=music_path, intro=not args.no_intro)
+    screen = ChatbotScreen(enabled=not args.no_screen, music_path=music_path, intro=not args.no_intro,
+                           subtitles=not args.no_subtitles)
     vo_box: dict = {}  # filled in by the background voiceover render; its temp WAV is deleted on the way out
     try:
         content = load_content(args.content)

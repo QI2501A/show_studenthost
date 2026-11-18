@@ -210,6 +210,41 @@
     background: #000;
     pointer-events: none;
   }
+  /* Subtitles along the bottom of the screen, for everything said aloud: the
+     chatbot's lines in the theme colour (green, red when it has taken over),
+     what the student says in white. Sits above the video so it also captions
+     the voiceover over the head video, and below the intro/closing screens
+     (which are silent). Sized from the screen HEIGHT, so it stays readable on
+     the very wide video wall as well as on a normal 16:9 display. */
+  #subtitle {
+    position: fixed;
+    left: 50%;
+    bottom: 5vh;
+    transform: translateX(-50%);
+    z-index: 900;
+    max-width: min(78vw, 1700px);
+    box-sizing: border-box;
+    padding: 0.35em 0.9em 0.4em;
+    background: rgba(0, 0, 0, 0.66);
+    border-radius: 0.3em;
+    font-family: "Segoe UI", "Helvetica Neue", Arial, system-ui, sans-serif;
+    font-size: clamp(22px, 3.6vh, 52px);
+    font-weight: 600;
+    line-height: 1.28;
+    text-align: center;
+    color: var(--fg);
+    text-shadow: 0 0 10px var(--fg-glow), 0 2px 4px rgba(0, 0, 0, 0.9);
+    opacity: 0;
+    transition: opacity 0.14s ease-out, bottom 0.25s ease-out;
+    pointer-events: none;
+  }
+  #subtitle.show { opacity: 1; }
+  /* The red "SYSTEM OVERRIDE -- ENTER CODE" box sits at the bottom centre
+     (26px up, 92px tall) for the whole red phase, including over the head
+     video: lift the subtitle clear of it so they never overlap. */
+  body:has(#overrideCommand.active) #subtitle { bottom: calc(26px + 92px + 2.2vh); }
+  #subtitle[data-who="student"] { color: #fff; text-shadow: 0 2px 4px rgba(0, 0, 0, 0.95); }
+
   /* Closing screen: the drone-light "Drone & Robotics Hub 2.0" page, faded in
      over the showcase's last frame and left running (its animation loops every
      12s) until the show is ended. */
@@ -365,6 +400,7 @@
        focus on THIS page: the intro page pauses itself on SPACE. -->
   <div id="introOverlay" aria-hidden="true"><iframe id="introFrame" tabindex="-1" title="Welcome"></iframe></div>
   <div id="closingOverlay" aria-hidden="true"><iframe id="closingFrame" tabindex="-1" title="Closing"></iframe></div>
+  <div id="subtitle" aria-live="polite"></div>
   <audio id="rogueMusic" loop preload="none"></audio>
 
   <div id="startOverlay"><div class="msg">&gt; CLICK TO ACTIVATE SYSTEM CHANNEL<br>(enters full-screen)</div></div>
@@ -455,6 +491,23 @@
       void introOverlay.offsetWidth;           // commit opacity:1 first so the transition actually runs
       introOverlay.classList.add('fading');
       setTimeout(finishIntro, introFadeMs + 200);
+    }
+
+    // --- Subtitles (Dialogue.py's set_subtitle / clear_subtitle) ---
+    // One line at a time along the bottom; empty text hides it. Every change
+    // carries a new sequence number, so the same words twice in a row still
+    // update, and a stale poll can never bring back an old line.
+    let lastSubtitleSeq = -1;
+    const subtitleEl = document.getElementById('subtitle');
+    function setSubtitle(sub) {
+      lastSubtitleSeq = sub.seq;
+      if (sub.text) {
+        subtitleEl.textContent = sub.text;
+        subtitleEl.dataset.who = sub.who || 'chatbot';
+        subtitleEl.classList.add('show');
+      } else {
+        subtitleEl.classList.remove('show');
+      }
     }
 
     // --- Closing screen (Dialogue.py's show_closing) ---
@@ -1311,6 +1364,7 @@
         if (typeof data.intro_fade_s === 'number' && data.intro_fade_s > 0) introFadeMs = data.intro_fade_s * 1000;
         if (data.intro === 'go') startIntro(); // started from somewhere other than this page (terminal ENTER, a future trigger)
         if (data.closing === 'on') showClosing();
+        if (data.subtitle && data.subtitle.seq !== lastSubtitleSeq) setSubtitle(data.subtitle);
         if (typeof data.rate_wpm === 'number' && data.rate_wpm > 0) rateWpm = data.rate_wpm;
         if (typeof data.has_music_file === 'boolean') hasMusicFile = data.has_music_file;
         if (typeof data.speaking === 'boolean' && window.__skullHead) window.__skullHead.setSpeaking(data.speaking);

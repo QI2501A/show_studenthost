@@ -134,6 +134,38 @@ def _stutter(y: np.ndarray, sr: int, rng: np.random.Generator, count: int,
     return y
 
 
+def cue_start_times(x: np.ndarray, sr: int, n_cues: int, min_pause_s: float = 0.18):
+    """For subtitles: when does each of `n_cues` sentences start in this audio?
+    Finds the silent gaps (>= min_pause_s) between sentences and takes the
+    n_cues-1 longest as the boundaries, so each cue starts right after one.
+    Returns [0.0, t1, t2, ...] (seconds), or None if the audio has too few
+    pauses to tell (the caller then spreads the cues by text length instead)."""
+    if n_cues <= 1:
+        return [0.0]
+    blk = max(1, int(sr * 0.02))
+    n = x.size // blk
+    if n < 4:
+        return None
+    rms = np.sqrt(np.mean(x[: n * blk].reshape(n, blk).astype(np.float64) ** 2, axis=1))
+    quiet = rms < 0.02
+    gaps = []                                   # (duration_s, end_time_s)
+    i = 0
+    while i < n:
+        if quiet[i]:
+            j = i
+            while j < n and quiet[j]:
+                j += 1
+            if i > 0 and j < n and (j - i) * blk / sr >= min_pause_s:   # interior gaps only, not lead-in/tail
+                gaps.append(((j - i) * blk / sr, j * blk / sr))
+            i = j
+        else:
+            i += 1
+    if len(gaps) < n_cues - 1:
+        return None
+    longest = sorted(sorted(gaps, key=lambda g: -g[0])[: n_cues - 1], key=lambda g: g[1])
+    return [0.0] + [round(g[1], 3) for g in longest]
+
+
 def loud_and_proud(y: np.ndarray, sr: int, target_rms_db: float = -7.5, ceiling: float = 0.97) -> np.ndarray:
     """Makes a voice much denser/louder without clipping: a block compressor
     (ratio 8, threshold -23 dBFS, fast attack, ~65ms release) evens out the
