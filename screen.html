@@ -1221,11 +1221,19 @@
       }, 90 + Math.random() * 200);
     }
 
+    // The OVERRIDE commands have reached the last line: start the red/green flashing
+    // (the sirens etc. were already switched over when 'recovering' began).
+    function beginRecoveryFlicker() {
+      if (currentTheme !== 'recovering') return;
+      currentTheme = 'flicker';
+      scheduleFlickerTick();
+    }
+
     function applyTheme(theme) {
       if (theme === currentTheme) return;
       currentTheme = theme;
       stopFlicker();
-      if (theme === 'flicker') {
+      if (theme === 'flicker' || theme === 'recovering') {
         // OVERRIDE was just confirmed: the code-entry field is done with
         // and tension music cuts immediately, but the screen keeps
         // flickering red/green — unsettled — while the "something is
@@ -1240,7 +1248,9 @@
         overrideInputEl.blur();
         overrideStatusEl.classList.remove('show');
         setSteadyThemeColor('red');
-        scheduleFlickerTick();
+        // 'recovering' holds the red until the last command appears (typeUtterance
+        // then switches to 'flicker'); 'flicker' starts flashing right away.
+        if (theme === 'flicker') scheduleFlickerTick();
         return;
       }
       setSteadyThemeColor(theme);
@@ -1344,6 +1354,8 @@
       if (outputEl.textContent.length > 0) outputEl.textContent += '\n\n';
       outputEl.textContent += '> ';
       for (let i = 0; i < segments.length; i++) {
+        // OVERRIDE sequence: stay red until the last command is on screen, then flash red/green.
+        if (segments.flickerAtLast && i === segments.length - 1 && currentTheme === 'recovering') beginRecoveryFlicker();
         await typeText(segments[i], generation);
         if (generation !== typingGeneration) return;
         if (i < segments.length - 1) {
@@ -1451,7 +1463,7 @@
         if (typeof data.speaking === 'boolean' && window.__skullHead) window.__skullHead.setSpeaking(data.speaking);
         if (typeof data.speaking === 'boolean') (window.__rogueSkulls || []).forEach((s) => s.setSpeaking(data.speaking));
         setSirenDuck(data.speaking === true, data.mode === 'video'); // keep the voice/video audible over the sirens
-        if (data.theme) applyTheme(data.theme);
+        if (data.theme && !(data.theme === 'recovering' && currentTheme === 'flicker')) applyTheme(data.theme);
 
         if (typeof data.clear_seq === 'number' && data.clear_seq !== lastClearSeq) {
           lastClearSeq = data.clear_seq;
@@ -1477,7 +1489,9 @@
         if (data.seq !== lastSeq) {
           lastSeq = data.seq;
           if (active && mode !== 'video' && data.segments && data.segments.length) {
-            queue.push(data.segments);
+            const segs = data.segments.slice();
+            segs.flickerAtLast = data.flicker_at_last === true;
+            queue.push(segs);
             if (!typing) processQueue();
           }
         }

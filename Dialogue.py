@@ -1048,7 +1048,7 @@ class ChatbotScreen:
             self._state["intro"] = "done"
         self._manual_override.clear()  # a SPACE press that started the intro must not also confirm the first cue
 
-    def show(self, segments: list[str]) -> int:
+    def show(self, segments: list[str], flicker_at_last: bool = False) -> int:
         """Safe to call even when the screen is unavailable — becomes a
         no-op and returns -1. Returns the new seq otherwise, so a caller
         that needs to know when the client has actually finished typing
@@ -1058,6 +1058,7 @@ class ChatbotScreen:
                 self._state["seq"] += 1
                 self._state["mode"] = "chat"
                 self._state["segments"] = list(segments)
+                self._state["flicker_at_last"] = bool(flicker_at_last)  # see screen.html: red/green flicker starts at the last line
                 return self._state["seq"]
         return -1
 
@@ -1282,7 +1283,7 @@ class ChatbotScreen:
                 rendered.append(f">>> {entry['cmd']}")
             elif "out" in entry:
                 rendered.append(str(entry["out"]))
-        return self.show(rendered)
+        return self.show(rendered, flicker_at_last=True)
 
     def close(self) -> None:
         if self.httpd:
@@ -2202,14 +2203,16 @@ def run_override(override: dict, hub: HubClient, override_keyword: str, screen: 
 
     print(f"{ANSI['green']}> OVERRIDE CONFIRMED{ANSI['reset']}")
     hub.stop_show()
-    # The screen holds on a red/green flicker (not a calm green) while the
+    # The screen stays red while the commands type, then flickers red/green from
+    # the last command's output until it settles (see "recovering" in screen.html).
+    # It holds on a red/green flicker (not a calm green) while the
     # "something is happening" commands play out — jumping straight to a
     # steady green here (the old behaviour) let the resolution's spoken
     # line start while those commands were still visibly mid-typewriter on
     # screen, i.e. the audio arrived before the visuals had caught up. See
     # the "flicker" branch in screen.html's applyTheme.
     screen.clear()
-    screen.set_theme("flicker")
+    screen.set_theme("recovering")   # stays red; the flicker starts when the last command appears (show_terminal)
 
     for item in override["items"]:
         if item.get("type") == "terminal":
