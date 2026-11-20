@@ -748,7 +748,14 @@ class _ScreenHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path in ("/", "/index.html"):
-            body = self.server.screen_html.encode("utf-8")
+            html = self.server.screen_html
+            with self.server.state_lock:
+                intro_state = self.server.state.get("intro")
+            if intro_state != "waiting":
+                # A reload mid-show must not bring the title overlay back (nothing
+                # would ever dismiss it): only a page loaded before the intro starts gets it.
+                html = html.replace('<body data-intro="on"', '<body data-intro="off"', 1)
+            body = html.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
