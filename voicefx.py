@@ -119,6 +119,25 @@ def _echo(x: np.ndarray, sr: int, taps) -> np.ndarray:
     return out
 
 
+def bass_heavy(y: np.ndarray, sr: int, boost_db: float = 9.0, shelf_hz: float = 260.0,
+               rolloff_hz: float = 2200.0, cut_db: float = 22.0) -> np.ndarray:
+    """Tilts a voice dark and heavy (FFT filter, zero phase): a smooth low-shelf
+    boost below `shelf_hz` and a treble cut that grows above `rolloff_hz`
+    (about -`cut_db` dB by 3 octaves up). Keeps the words, which sit under
+    ~3 kHz, but takes the fizz and sibilance out of the distortion."""
+    n = y.size
+    if n < 64:
+        return y
+    spec = np.fft.rfft(y.astype(np.float64))
+    f = np.fft.rfftfreq(n, 1.0 / sr)
+    shelf = 1.0 / (1.0 + (f / shelf_hz) ** 2)                      # 1 at DC -> 0 above the shelf
+    octaves_up = np.log2(np.maximum(f, 1.0) / rolloff_hz)
+    cut = np.clip(octaves_up, 0.0, 4.0) / 3.0                      # 0 below rolloff, 1 three octaves up
+    gain_db = boost_db * shelf - cut_db * cut
+    spec *= 10.0 ** (gain_db / 20.0)
+    return np.fft.irfft(spec, n).astype(np.float32)
+
+
 def _stutter(y: np.ndarray, sr: int, rng: np.random.Generator, count: int,
              grain_s=(0.03, 0.07), bias: float = 0.0) -> np.ndarray:
     """Repeats a tiny slice of the audio a few times -- a skipping/glitching
@@ -213,6 +232,7 @@ def rogue_voice(x: np.ndarray, sr: int, seed=None) -> np.ndarray:
     y = _stutter(y, sr, rng, count=3)
     y = np.tanh(2.6 * _normalise(y, 0.85))          # drive into soft clipping
     y = _echo(y, sr, [(0.11, 0.36), (0.24, 0.22), (0.41, 0.12)])
+    y = bass_heavy(y, sr)                           # dark and heavy: low end up, treble fizz out
     # Compress + limit to a much higher average level (about -9 dBFS of speech,
     # from ~-16) so it stays on top of the sirens and drone beneath it.
     return loud_and_proud(y, sr).astype(np.float32)
@@ -277,6 +297,7 @@ def dying_transformer(x: np.ndarray, sr: int, intensity: float = 0.5, seed=None)
         end = min(total, c_start + c_len)
         y[c_start:end] += chirp[: end - c_start]
 
+    y = bass_heavy(y, sr, boost_db=7.0, rolloff_hz=2600.0, cut_db=16.0)   # still dark: it brightens only once OVERRIDE completes
     y = _normalise(y, 0.8)
 
     # 6. The last gasp: a falling power-down whine and a puff of static,

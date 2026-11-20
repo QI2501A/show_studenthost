@@ -972,7 +972,7 @@ class ChatbotScreen:
             "has_music_file": self._music_path is not None,
             "has_rain_music": bool(rain_music and RAIN_MUSIC.is_file()),
             "has_recovery_music": bool(rain_music and RECOVERY_MUSIC.is_file()),
-            "recovery_music": "off", "listening": False, "duck_hold": False,
+            "recovery_music": "off", "listening": False, "duck_hold": False, "override_prompt": False,
             "heard_seq": 0, "heard_segments": [],
             "override_feedback_seq": 0, "override_feedback_ok": True,
             "intro": "waiting" if self.intro_enabled else "off", "intro_fade_s": INTRO_FADE_S,
@@ -1254,6 +1254,11 @@ class ChatbotScreen:
         """Keeps the sirens/music ducked even before the voice has started
         playing (the processed rogue voice takes a moment to render)."""
         self._set_flag("duck_hold", bool(hold))
+
+    def set_override_prompt(self, show: bool) -> None:
+        """Shows/hides the red 'ENTER CODE' box. It only appears once the rogue
+        head video and its voiceover are over (see run_override)."""
+        self._set_flag("override_prompt", bool(show))
 
     def start_recovery_music(self) -> None:
         """The robots are back under control: the dramatic score starts."""
@@ -2183,6 +2188,8 @@ def run_override(override: dict, hub: HubClient, override_keyword: str, screen: 
 
     threading.Thread(target=read_stdin, daemon=True).start()
 
+    screen.set_override_prompt(True)   # the code box appears now: the head video + voiceover are over
+
     while True:
         try:
             candidate = screen.override_command_texts.get(timeout=0.075)
@@ -2202,6 +2209,7 @@ def run_override(override: dict, hub: HubClient, override_keyword: str, screen: 
                   f"or key it in on the chatbot screen){ANSI['reset']}")
 
     print(f"{ANSI['green']}> OVERRIDE CONFIRMED{ANSI['reset']}")
+    screen.set_override_prompt(False)
     hub.stop_show()
     # The screen stays red while the commands type, then flickers red/green from
     # the last command's output until it settles (see "recovering" in screen.html).

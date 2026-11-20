@@ -753,7 +753,7 @@
 
         const pulseOsc = synthCtx.createOscillator();
         pulseOsc.type = 'sine';
-        pulseOsc.frequency.value = 110;
+        pulseOsc.frequency.value = 55;
         const pulseGain = synthCtx.createGain();
         pulseGain.gain.value = 0;
         pulseOsc.connect(pulseGain).connect(master);
@@ -854,8 +854,23 @@
       out.gain.value = 1;
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 256;
-      master.connect(shaper); shaper.connect(comp); comp.connect(out);
+      // Tone stage: the red phase is bass-heavy -- a big low shelf, the treble
+      // rolled off hard. brighten() opens it up once OVERRIDE has completed.
+      const bassShelf = ctx.createBiquadFilter(); bassShelf.type = 'lowshelf';
+      bassShelf.frequency.value = 220; bassShelf.gain.value = 12;
+      const trebleShelf = ctx.createBiquadFilter(); trebleShelf.type = 'highshelf';
+      trebleShelf.frequency.value = 1800; trebleShelf.gain.value = -16;
+      const trebleCut = ctx.createBiquadFilter(); trebleCut.type = 'lowpass';
+      trebleCut.frequency.value = 3200; trebleCut.Q.value = 0.5;
+      master.connect(shaper); shaper.connect(comp);
+      comp.connect(bassShelf); bassShelf.connect(trebleShelf); trebleShelf.connect(trebleCut); trebleCut.connect(out);
       out.connect(ctx.destination); out.connect(analyser);
+      const brighten = () => {
+        const t = ctx.currentTime;
+        bassShelf.gain.setTargetAtTime(0, t, 0.3);
+        trebleShelf.gain.setTargetAtTime(0, t, 0.3);
+        trebleCut.frequency.setTargetAtTime(16000, t, 0.3);
+      };
 
       const route = (node, panValue) => {
         if (ctx.createStereoPanner) {
@@ -908,7 +923,7 @@
         src.connect(bp); bp.connect(g); route(g, panV);
         src.start(t, rand(0, 0.5)); src.stop(t + dur + 0.02);
       }
-      return { ctx, master, out, analyser, route, rand, beep, sweep, noiseBurst };
+      return { ctx, master, out, analyser, route, rand, beep, sweep, noiseBurst, brighten };
     }
 
     function startRogueSirens() {
@@ -920,7 +935,8 @@
 
         // Bed 1 & 2: wailing sirens, each pitch-swept by its own LFO.
         const wails = [];
-        [[850, 380, 0.4, -0.5, 0.5], [610, 260, 0.63, 0.5, 0.32], [1300, 420, 1.1, 0, 0.2]].forEach(([base, depth, rate, panV, gain]) => {
+        // Pitched well down (was 850/610/1300 Hz) so the alarm sits in the low end.
+        [[340, 150, 0.4, -0.5, 0.5], [245, 105, 0.63, 0.5, 0.36], [520, 170, 1.1, 0, 0.12]].forEach(([base, depth, rate, panV, gain]) => {
           const osc = ctx.createOscillator(); osc.type = 'sawtooth'; osc.frequency.value = base;
           const lfo = ctx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = rate;
           const lfoGain = ctx.createGain(); lfoGain.gain.value = depth;
@@ -936,6 +952,19 @@
         const twoToneGain = ctx.createGain(); twoToneGain.gain.value = 0.16;
         twoTone.connect(twoToneGain); route(twoToneGain, 0);
         twoTone.start();
+
+        // Sub-bass bed: a slow heartbeat-like thump on a 41 Hz sine plus a
+        // low saw growl, straight into the master (below the distortion's reach).
+        const subOsc = ctx.createOscillator(); subOsc.type = 'sine'; subOsc.frequency.value = 41;
+        const growl = ctx.createOscillator(); growl.type = 'sawtooth'; growl.frequency.value = 55;
+        const growlLp = ctx.createBiquadFilter(); growlLp.type = 'lowpass'; growlLp.frequency.value = 160;
+        const subGain = ctx.createGain(); subGain.gain.value = 0.55;
+        const thump = ctx.createOscillator(); thump.type = 'sine'; thump.frequency.value = 1.6; // pulses ~96/min
+        const thumpDepth = ctx.createGain(); thumpDepth.gain.value = 0.3;
+        thump.connect(thumpDepth); thumpDepth.connect(subGain.gain);
+        subOsc.connect(subGain); growl.connect(growlLp); growlLp.connect(subGain);
+        subGain.connect(master);
+        subOsc.start(); growl.start(); thump.start();
         let twoToneNext = ctx.currentTime;
         let twoToneHigh = true;
 
@@ -1046,7 +1075,7 @@
 
         master.gain.setValueAtTime(0, ctx.currentTime);
         master.gain.linearRampToValueAtTime(SIREN_LEVEL * 0.65, ctx.currentTime + 0.35); // punches in almost at once
-        sirenNodes = { master, wails, twoTone, wailTimer, tick, analyser };
+        sirenNodes = { master, wails, twoTone, wailTimer, tick, analyser, subs: [subOsc, growl, thump] };
       } catch (e) {
         // Web Audio unsupported/blocked -- the show still runs, just quieter
       }
@@ -1069,6 +1098,7 @@
           try {
             nodes.wails.forEach((w) => { w.osc.stop(); w.lfo.stop(); });
             nodes.twoTone.stop();
+            nodes.subs.forEach((o) => o.stop());
             ctx.close();
           } catch (e) {}
         }, 450);
@@ -1091,12 +1121,12 @@
     function startDyingSirens() {
       if (dyingCtx) return;
       try {
-        const { ctx, master, out, analyser, route, rand, beep, sweep, noiseBurst } = makeSirenChain();
+        const { ctx, master, out, analyser, route, rand, beep, sweep, noiseBurst, brighten } = makeSirenChain();
         dyingCtx = ctx;
         const t0 = ctx.currentTime;
 
-        // Two wails that sag, slow and calm down.
-        const wails = [[850, 0.5, -0.5, 0.5], [610, 0.75, 0.5, 0.34]].map(([base, rate, panV, gain]) => {
+        // Two wails that sag, slow and calm down (pitched low: still bass-heavy).
+        const wails = [[340, 0.5, -0.5, 0.5], [245, 0.75, 0.5, 0.36]].map(([base, rate, panV, gain]) => {
           const osc = ctx.createOscillator(); osc.type = 'sawtooth';
           osc.frequency.setValueAtTime(base, t0);
           osc.frequency.exponentialRampToValueAtTime(base * 0.16, t0 + DYING_LIFE_S);   // pitch sags
@@ -1104,7 +1134,7 @@
           lfo.frequency.setValueAtTime(rate, t0);
           lfo.frequency.exponentialRampToValueAtTime(0.05, t0 + DYING_LIFE_S);          // wail slows to a crawl
           const lfoGain = ctx.createGain();
-          lfoGain.gain.setValueAtTime(380, t0);
+          lfoGain.gain.setValueAtTime(150, t0);
           lfoGain.gain.exponentialRampToValueAtTime(10, t0 + DYING_LIFE_S);             // swing flattens out
           lfo.connect(lfoGain); lfoGain.connect(osc.frequency);
           const g = ctx.createGain();
@@ -1122,7 +1152,7 @@
         function mayday() {
           const e = ctx.currentTime - t0;
           if (dyingCtx !== ctx || e > DYING_LIFE_S) return;
-          const f = 1000 * Math.pow(0.55, e / DYING_LIFE_S);
+          const f = 440 * Math.pow(0.55, e / DYING_LIFE_S);
           const amp = 0.34 * decayAt() + 0.02;
           const unit = 0.13 * (1 + e / 12);
           let at = 0;
@@ -1152,7 +1182,7 @@
 
         master.gain.setValueAtTime(0, t0);
         master.gain.linearRampToValueAtTime(SIREN_LEVEL * 0.95, t0 + 0.25);
-        dyingNodes = { master, out, wails, tick, getSos: () => sosTimer, sweep, ctx, analyser };
+        dyingNodes = { master, out, wails, tick, getSos: () => sosTimer, sweep, ctx, analyser, brighten };
         // Failsafe: if the green "all clear" never arrives, end on our own.
         setTimeout(() => { if (dyingCtx === ctx) stopDyingSirens(true); }, (DYING_LIFE_S + 8) * 1000);
       } catch (e) {
@@ -1176,7 +1206,7 @@
         const fade = finalGasp ? 0.5 : 0.3;
         const level = finalGasp ? SIREN_LEVEL * 0.7 : nodes.master.gain.value;
         nodes.out.gain.setTargetAtTime(currentSirenDuck(), now, 0.04); // keep ducking the gasp if the voice has started
-        if (finalGasp) nodes.sweep(260, 34, 1.0, 'sawtooth', 0.6, 0);
+        if (finalGasp) { nodes.brighten(); nodes.sweep(260, 34, 1.0, 'sawtooth', 0.6, 0); } // OVERRIDE complete: the tone opens up
         nodes.master.gain.cancelScheduledValues(now);
         nodes.master.gain.setValueAtTime(level, now);
         nodes.master.gain.setValueAtTime(level, now + hold);
@@ -1260,8 +1290,8 @@
         (window.__rogueSkulls || []).forEach((s) => s.replay()); // they assemble in as the takeover starts
         startMenacingMusic();
         startRogueSirens();
-        overrideCommandEl.classList.add('active');
-        setTimeout(() => overrideInputEl.focus(), 60);
+        // The ENTER CODE box is NOT shown here: it appears only once the head
+        // video + voiceover are over (data.override_prompt, see poll()).
       } else {
         stopMenacingMusic();
         stopRogueSirens();
@@ -1464,6 +1494,14 @@
         if (typeof data.speaking === 'boolean') (window.__rogueSkulls || []).forEach((s) => s.setSpeaking(data.speaking));
         setSirenDuck(data.speaking === true, data.mode === 'video'); // keep the voice/video audible over the sirens
         if (data.theme && !(data.theme === 'recovering' && currentTheme === 'flicker')) applyTheme(data.theme);
+        // The code-entry box: red phase only, and only after the rogue video + voiceover.
+        const wantPrompt = data.override_prompt === true && currentTheme === 'red' && data.mode !== 'video';
+        if (wantPrompt && !overrideCommandEl.classList.contains('active')) {
+          overrideCommandEl.classList.add('active');
+          setTimeout(() => overrideInputEl.focus(), 60);
+        } else if (!wantPrompt && overrideCommandEl.classList.contains('active') && currentTheme === 'red') {
+          overrideCommandEl.classList.remove('active');
+        }
 
         if (typeof data.clear_seq === 'number' && data.clear_seq !== lastClearSeq) {
           lastClearSeq = data.clear_seq;
